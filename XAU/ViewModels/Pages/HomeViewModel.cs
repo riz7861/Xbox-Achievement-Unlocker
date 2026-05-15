@@ -102,16 +102,8 @@ namespace XAU.ViewModels.Pages
             public int Frequency { get; set; }
             public int AddressCount { get; set; }
             public string Hash { get; set; } = "";
-            public bool StartsWithXbl3 { get; set; }
-            public int SemicolonCount { get; set; }
-            public int SemicolonIndex { get; set; }
-            public int NewlineIndex { get; set; }
-            public int PrefixCount { get; set; }
-            public int MaxRepeatedCharRun { get; set; }
-            public bool IsRecentlyRejected { get; set; }
             public bool IsQuarantined { get; set; }
             public int Score { get; set; }
-            public int TokenLength => Candidate.Length;
         }
 
         [RelayCommand]
@@ -143,7 +135,7 @@ namespace XAU.ViewModels.Pages
             _xboxRestAPI = new Lazy<XboxRestAPI>(() => new XboxRestAPI(XAUTH));
         }
 
-        private void ResetXauthScanBackoff(string reason)
+        private void ResetXauthScanBackoff()
         {
             if (_xauthNoStableCandidateFailures == 0 && _nextXauthScanUtc == DateTime.MinValue)
                 return;
@@ -169,13 +161,12 @@ namespace XAU.ViewModels.Pages
                 _nextXauthScanUtc = DateTime.UtcNow + delay;
         }
 
-        private bool IsXauthScanBackoffActive(out TimeSpan remaining)
+        private bool IsXauthScanBackoffActive()
         {
-            remaining = _nextXauthScanUtc - DateTime.UtcNow;
-            return remaining > TimeSpan.Zero;
+            return _nextXauthScanUtc > DateTime.UtcNow;
         }
 
-        private void ResetXauthValidationFailureBackoff(string reason)
+        private void ResetXauthValidationFailureBackoff()
         {
             if (_xauthValidationFailures == 0 && _nextXauthValidationRetryUtc == DateTime.MinValue)
                 return;
@@ -184,7 +175,7 @@ namespace XAU.ViewModels.Pages
             _nextXauthValidationRetryUtc = DateTime.MinValue;
         }
 
-        private void TrackXauthValidationFailureBackoff(string reason)
+        private void TrackXauthValidationFailureBackoff()
         {
             _xauthValidationFailures++;
 
@@ -199,10 +190,9 @@ namespace XAU.ViewModels.Pages
             _nextXauthValidationRetryUtc = DateTime.UtcNow + delay;
         }
 
-        private bool IsXauthValidationFailureBackoffActive(out TimeSpan remaining)
+        private bool IsXauthValidationFailureBackoffActive()
         {
-            remaining = _nextXauthValidationRetryUtc - DateTime.UtcNow;
-            return remaining > TimeSpan.Zero;
+            return _nextXauthValidationRetryUtc > DateTime.UtcNow;
         }
 
         private static bool IsValidXauthCandidate(string candidate)
@@ -215,7 +205,7 @@ namespace XAU.ViewModels.Pages
             return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(candidate)));
         }
 
-        private void ResetRejectedXauthCandidateQuarantine(string reason)
+        private void ResetRejectedXauthCandidateQuarantine()
         {
             if (string.IsNullOrEmpty(_rejectedXauthCandidateHash) && _rejectedXauthCandidateUntilUtc == DateTime.MinValue)
                 return;
@@ -224,7 +214,19 @@ namespace XAU.ViewModels.Pages
             _rejectedXauthCandidateUntilUtc = DateTime.MinValue;
         }
 
-        private void QuarantineRejectedXauthCandidate(string candidate, string reason)
+        private void ResetXauthFailureState()
+        {
+            ResetXauthValidationFailureBackoff();
+            ResetRejectedXauthCandidateQuarantine();
+        }
+
+        private void ResetXauthScanState()
+        {
+            ResetXauthScanBackoff();
+            ResetXauthFailureState();
+        }
+
+        private void QuarantineRejectedXauthCandidate(string candidate)
         {
             if (string.IsNullOrWhiteSpace(candidate))
                 return;
@@ -232,48 +234,6 @@ namespace XAU.ViewModels.Pages
             var candidateHash = HashXauthCandidate(candidate);
             _rejectedXauthCandidateHash = candidateHash;
             _rejectedXauthCandidateUntilUtc = DateTime.UtcNow + RejectedXauthCandidateQuarantine;
-        }
-
-        private bool IsRejectedXauthCandidateQuarantined(string candidateHash)
-        {
-            return _rejectedXauthCandidateUntilUtc > DateTime.UtcNow
-                && !string.IsNullOrEmpty(_rejectedXauthCandidateHash)
-                && string.Equals(candidateHash, _rejectedXauthCandidateHash, StringComparison.Ordinal);
-        }
-
-        private bool IsRejectedXauthCandidateHash(string candidateHash)
-        {
-            return !string.IsNullOrEmpty(candidateHash)
-                && !string.IsNullOrEmpty(_rejectedXauthCandidateHash)
-                && string.Equals(candidateHash, _rejectedXauthCandidateHash, StringComparison.Ordinal);
-        }
-
-        private static int CountOccurrences(string value, char target)
-        {
-            var count = 0;
-            foreach (var ch in value)
-            {
-                if (ch == target)
-                    count++;
-            }
-
-            return count;
-        }
-
-        private static int CountOccurrences(string value, string target)
-        {
-            if (string.IsNullOrEmpty(value) || string.IsNullOrEmpty(target))
-                return 0;
-
-            var count = 0;
-            var index = 0;
-            while ((index = value.IndexOf(target, index, StringComparison.Ordinal)) >= 0)
-            {
-                count++;
-                index += target.Length;
-            }
-
-            return count;
         }
 
         private static int GetMaxRepeatedCharRun(string value)
@@ -302,59 +262,52 @@ namespace XAU.ViewModels.Pages
 
         private XauthCandidateRank BuildXauthCandidateRank(string candidate, int frequency, int addressCount, int medianLength)
         {
+            const string xauthPrefix = "XBL3.0 x=";
             var candidateHash = HashXauthCandidate(candidate);
-            var rank = new XauthCandidateRank
+            var isRecentlyRejected = !string.IsNullOrEmpty(_rejectedXauthCandidateHash)
+                && string.Equals(candidateHash, _rejectedXauthCandidateHash, StringComparison.Ordinal);
+            var isQuarantined = isRecentlyRejected && _rejectedXauthCandidateUntilUtc > DateTime.UtcNow;
+            var prefixIndex = candidate.IndexOf(xauthPrefix, StringComparison.Ordinal);
+            var semicolonIndex = candidate.IndexOf(';');
+            var tokenLength = candidate.Length;
+            var score = 0;
+
+            score += prefixIndex == 0 ? 80 : -80;
+            score += candidate.Count(ch => ch == ';') == 1 ? 40 : -60;
+            score += semicolonIndex >= xauthPrefix.Length && semicolonIndex <= 128 ? 30 : -30;
+            score += candidate.IndexOfAny(new[] { '\r', '\n' }) < 0 ? 30 : -80;
+            score += tokenLength is >= 200 and <= 6000 ? 20 : -40;
+
+            if (medianLength > 0)
+            {
+                var lengthDelta = Math.Abs(tokenLength - medianLength);
+                score -= Math.Min(40, lengthDelta / 100);
+            }
+
+            score += addressCount * 3;
+            score += frequency * 2;
+
+            if (isRecentlyRejected)
+                score -= 120;
+
+            if (isQuarantined)
+                score -= 100000;
+
+            if (prefixIndex < 0 || prefixIndex != candidate.LastIndexOf(xauthPrefix, StringComparison.Ordinal))
+                score -= 80;
+
+            if (GetMaxRepeatedCharRun(candidate) >= 128)
+                score -= 60;
+
+            return new XauthCandidateRank
             {
                 Candidate = candidate,
                 Frequency = frequency,
                 AddressCount = addressCount,
                 Hash = candidateHash,
-                StartsWithXbl3 = candidate.StartsWith("XBL3.0 x=", StringComparison.Ordinal),
-                SemicolonCount = CountOccurrences(candidate, ';'),
-                SemicolonIndex = candidate.IndexOf(';'),
-                NewlineIndex = candidate.IndexOfAny(new[] { '\r', '\n' }),
-                PrefixCount = CountOccurrences(candidate, "XBL3.0 x="),
-                MaxRepeatedCharRun = GetMaxRepeatedCharRun(candidate),
-                IsRecentlyRejected = IsRejectedXauthCandidateHash(candidateHash),
-                IsQuarantined = IsRejectedXauthCandidateQuarantined(candidateHash)
+                IsQuarantined = isQuarantined,
+                Score = score
             };
-
-            rank.Score = ScoreXauthCandidate(rank, medianLength);
-            return rank;
-        }
-
-        private static int ScoreXauthCandidate(XauthCandidateRank candidate, int medianLength)
-        {
-            var score = 0;
-
-            score += candidate.StartsWithXbl3 ? 80 : -80;
-            score += candidate.SemicolonCount == 1 ? 40 : -60;
-            score += candidate.SemicolonIndex >= "XBL3.0 x=".Length && candidate.SemicolonIndex <= 128 ? 30 : -30;
-            score += candidate.NewlineIndex < 0 ? 30 : -80;
-            score += candidate.TokenLength is >= 200 and <= 6000 ? 20 : -40;
-
-            if (medianLength > 0)
-            {
-                var lengthDelta = Math.Abs(candidate.TokenLength - medianLength);
-                score -= Math.Min(40, lengthDelta / 100);
-            }
-
-            score += candidate.AddressCount * 3;
-            score += candidate.Frequency * 2;
-
-            if (candidate.IsRecentlyRejected)
-                score -= 120;
-
-            if (candidate.IsQuarantined)
-                score -= 100000;
-
-            if (candidate.PrefixCount != 1)
-                score -= 80;
-
-            if (candidate.MaxRepeatedCharRun >= 128)
-                score -= 60;
-
-            return score;
         }
 
         private static int GetMedianLength(IEnumerable<string> candidates)
@@ -369,9 +322,9 @@ namespace XAU.ViewModels.Pages
                 : (lengths[middle - 1] + lengths[middle]) / 2;
         }
 
-        private void ResetAttachStateAfterFailedValidation(string reason)
+        private void ResetAttachStateAfterFailedValidation()
         {
-            TrackXauthValidationFailureBackoff(reason);
+            TrackXauthValidationFailureBackoff();
             IsLoggedIn = false;
             XAUTH = "";
             XUIDOnly = "";
@@ -381,7 +334,14 @@ namespace XAU.ViewModels.Pages
             LoggedIn = "Not Logged In";
             LoggedInColor = new SolidColorBrush(Colors.Red);
             ResetXboxRestApiClient();
-            ResetXauthScanBackoff("attach state reset after failed validation");
+            ResetXauthScanBackoff();
+        }
+
+        private void ClearAttachAfterProcessFailure()
+        {
+            IsAttached = false;
+            _attachedXboxPid = 0;
+            ResetXauthFailureState();
         }
 
         public async void OnNavigatedTo()
@@ -675,18 +635,13 @@ namespace XAU.ViewModels.Pages
                     if (xboxAppPid != _lastSelectedXboxPid)
                     {
                         _attachedXboxPid = 0;
-                        ResetXauthScanBackoff($"selected PID changed from {_lastSelectedXboxPid} to {xboxAppPid}");
-                        ResetXauthValidationFailureBackoff($"selected PID changed from {_lastSelectedXboxPid} to {xboxAppPid}");
-                        ResetRejectedXauthCandidateQuarantine($"selected PID changed from {_lastSelectedXboxPid} to {xboxAppPid}");
+                        ResetXauthScanState();
                         _lastSelectedXboxPid = xboxAppPid;
                     }
                 }
                 catch (Exception)
                 {
-                    IsAttached = false;
-                    _attachedXboxPid = 0;
-                    ResetXauthValidationFailureBackoff("Xbox app process lookup failed");
-                    ResetRejectedXauthCandidateQuarantine("Xbox app process lookup failed");
+                    ClearAttachAfterProcessFailure();
                     Thread.Sleep(1000);
                     XauthWorker.ReportProgress(0);
                     continue;
@@ -694,10 +649,7 @@ namespace XAU.ViewModels.Pages
 
                 if (xboxAppPid == 0)
                 {
-                    IsAttached = false;
-                    _attachedXboxPid = 0;
-                    ResetXauthValidationFailureBackoff("Xbox app process not found");
-                    ResetRejectedXauthCandidateQuarantine("Xbox app process not found");
+                    ClearAttachAfterProcessFailure();
                     Thread.Sleep(1000);
                 }
                 else if (IsAttached && _attachedXboxPid == xboxAppPid)
@@ -706,10 +658,7 @@ namespace XAU.ViewModels.Pages
                 }
                 else if (!m.OpenProcess(xboxAppPid, out _))
                 {
-                    IsAttached = false;
-                    _attachedXboxPid = 0;
-                    ResetXauthValidationFailureBackoff("OpenProcess failed");
-                    ResetRejectedXauthCandidateQuarantine("OpenProcess failed");
+                    ClearAttachAfterProcessFailure();
                     Thread.Sleep(1000);
                 }
                 else
@@ -762,69 +711,29 @@ namespace XAU.ViewModels.Pages
                 XauthWorker.RunWorkerAsync();
         }
 
+        private bool ShouldSkipXauthScan()
+        {
+            return IsLoggedIn
+                || InitComplete
+                || Interlocked.CompareExchange(ref _xauthValidationInFlight, 0, 0) != 0
+                || (!string.IsNullOrEmpty(XAUTH) && !XAUTHTested)
+                || IsXauthValidationFailureBackoffActive()
+                || IsXauthScanBackoffActive();
+        }
+
         private bool TryBeginXauthScan()
         {
-            if (IsLoggedIn || InitComplete)
-            {
+            if (ShouldSkipXauthScan())
                 return false;
-            }
-
-            if (Interlocked.CompareExchange(ref _xauthValidationInFlight, 0, 0) != 0)
-            {
-                return false;
-            }
-
-            if (!string.IsNullOrEmpty(XAUTH) && !XAUTHTested)
-            {
-                return false;
-            }
-
-            if (IsXauthValidationFailureBackoffActive(out var validationFailureRemaining))
-            {
-                return false;
-            }
-
-            if (IsXauthScanBackoffActive(out var remaining))
-            {
-                return false;
-            }
 
             if (Interlocked.CompareExchange(ref _xauthScanInFlight, 1, 0) != 0)
-            {
                 return false;
-            }
 
-            if (IsLoggedIn || InitComplete)
-            {
-                Interlocked.Exchange(ref _xauthScanInFlight, 0);
-                return false;
-            }
+            if (!ShouldSkipXauthScan())
+                return true;
 
-            if (Interlocked.CompareExchange(ref _xauthValidationInFlight, 0, 0) != 0)
-            {
-                Interlocked.Exchange(ref _xauthScanInFlight, 0);
-                return false;
-            }
-
-            if (!string.IsNullOrEmpty(XAUTH) && !XAUTHTested)
-            {
-                Interlocked.Exchange(ref _xauthScanInFlight, 0);
-                return false;
-            }
-
-            if (IsXauthValidationFailureBackoffActive(out validationFailureRemaining))
-            {
-                Interlocked.Exchange(ref _xauthScanInFlight, 0);
-                return false;
-            }
-
-            if (IsXauthScanBackoffActive(out remaining))
-            {
-                Interlocked.Exchange(ref _xauthScanInFlight, 0);
-                return false;
-            }
-
-            return true;
+            Interlocked.Exchange(ref _xauthScanInFlight, 0);
+            return false;
         }
 
         private async void GetXAUTH()
@@ -834,32 +743,24 @@ namespace XAU.ViewModels.Pages
 
             try
             {
-                IEnumerable<long> XauthScanList = await m.AoBScan(XAuthScanPattern, true);
-                var xauthScanAddresses = XauthScanList.ToList();
-                var addressCount = xauthScanAddresses.Count;
+                var xauthScanAddresses = (await m.AoBScan(XAuthScanPattern, true)).ToList();
                 Dictionary<string, int> frequency = new Dictionary<string, int>();
                 Dictionary<string, HashSet<long>> candidateAddresses = new Dictionary<string, HashSet<long>>();
 
-                for (var i = 0; i < xauthScanAddresses.Count; i++)
+                foreach (var address in xauthScanAddresses)
                 {
-                    var address = xauthScanAddresses[i];
                     var candidate = m.ReadString(address.ToString("X"), length: 10000) ?? string.Empty;
 
-                    if (!frequency.ContainsKey(candidate))
-                        frequency[candidate] = 0;
-
-                    frequency[candidate]++;
+                    frequency.TryGetValue(candidate, out var count);
+                    frequency[candidate] = count + 1;
 
                     if (!candidateAddresses.TryGetValue(candidate, out var addresses))
-                    {
-                        addresses = new HashSet<long>();
-                        candidateAddresses[candidate] = addresses;
-                    }
+                        candidateAddresses[candidate] = addresses = new HashSet<long>();
 
                     addresses.Add(address);
                 }
 
-                if (addressCount == 0)
+                if (xauthScanAddresses.Count == 0)
                 {
                     TrackNoStableXauthScan();
                     return;
@@ -869,61 +770,46 @@ namespace XAU.ViewModels.Pages
                     .Where(pair => pair.Value > 3)
                     .ToList();
 
-                if (stableCandidates.Count > 0)
-                {
-                    var validStableCandidates = new List<KeyValuePair<string, int>>();
-                    foreach (var pair in stableCandidates)
-                    {
-                        var candidate = pair.Key ?? string.Empty;
-
-                        if (!IsValidXauthCandidate(candidate))
-                        {
-                            continue;
-                        }
-
-                        validStableCandidates.Add(new KeyValuePair<string, int>(candidate, pair.Value));
-                    }
-
-                    if (validStableCandidates.Count == 0)
-                        return;
-
-                    var medianLength = GetMedianLength(validStableCandidates.Select(pair => pair.Key));
-                    var rankedCandidates = validStableCandidates
-                        .Select(pair =>
-                        {
-                            var candidateAddressCount = candidateAddresses.TryGetValue(pair.Key, out var addresses)
-                                ? addresses.Count
-                                : 0;
-                            return BuildXauthCandidateRank(pair.Key, pair.Value, candidateAddressCount, medianLength);
-                        })
-                        .OrderBy(candidate => candidate.IsQuarantined ? 1 : 0)
-                        .ThenByDescending(candidate => candidate.Score)
-                        .ThenByDescending(candidate => candidate.AddressCount)
-                        .ThenByDescending(candidate => candidate.Frequency)
-                        .ToList();
-
-                    var selectedCandidate = rankedCandidates[0];
-                    if (selectedCandidate.IsQuarantined)
-                    {
-                        return;
-                    }
-
-                    if (!string.Equals(selectedCandidate.Hash, _lastAcceptedXauthCandidateHash, StringComparison.Ordinal))
-                    {
-                        ResetXauthValidationFailureBackoff("different XAUTH candidate accepted");
-                        ResetRejectedXauthCandidateQuarantine("different XAUTH candidate accepted");
-                    }
-
-                    _lastAcceptedXauthCandidateHash = selectedCandidate.Hash;
-                    XAUTH = selectedCandidate.Candidate;
-                    XAUTHTested = false;
-                    ResetXauthScanBackoff("XAUTH candidate accepted");
-                    ResetXboxRestApiClient();
-                }
-                else
+                if (stableCandidates.Count == 0)
                 {
                     TrackNoStableXauthScan();
+                    return;
                 }
+
+                var validStableCandidates = stableCandidates
+                    .Select(pair => new KeyValuePair<string, int>(pair.Key ?? string.Empty, pair.Value))
+                    .Where(pair => IsValidXauthCandidate(pair.Key))
+                    .ToList();
+
+                if (validStableCandidates.Count == 0)
+                    return;
+
+                var medianLength = GetMedianLength(validStableCandidates.Select(pair => pair.Key));
+                var selectedCandidate = validStableCandidates
+                    .Select(pair =>
+                    {
+                        var candidateAddressCount = candidateAddresses.TryGetValue(pair.Key, out var addresses)
+                            ? addresses.Count
+                            : 0;
+                        return BuildXauthCandidateRank(pair.Key, pair.Value, candidateAddressCount, medianLength);
+                    })
+                    .OrderBy(candidate => candidate.IsQuarantined ? 1 : 0)
+                    .ThenByDescending(candidate => candidate.Score)
+                    .ThenByDescending(candidate => candidate.AddressCount)
+                    .ThenByDescending(candidate => candidate.Frequency)
+                    .First();
+
+                if (selectedCandidate.IsQuarantined)
+                    return;
+
+                if (!string.Equals(selectedCandidate.Hash, _lastAcceptedXauthCandidateHash, StringComparison.Ordinal))
+                    ResetXauthFailureState();
+
+                _lastAcceptedXauthCandidateHash = selectedCandidate.Hash;
+                XAUTH = selectedCandidate.Candidate;
+                XAUTHTested = false;
+                ResetXauthScanBackoff();
+                ResetXboxRestApiClient();
             }
             catch
             {
@@ -960,9 +846,7 @@ namespace XAU.ViewModels.Pages
                 IsLoggedIn = true;
                 XAUTHTested = true;
                 InitComplete = true;
-                ResetXauthScanBackoff("XAUTH validation succeeded");
-                ResetXauthValidationFailureBackoff("XAUTH validation succeeded");
-                ResetRejectedXauthCandidateQuarantine("XAUTH validation succeeded");
+                ResetXauthScanState();
 
                 // Start the events token worker to periodically check/refresh the token
                 if (Settings.AutoGrabEventsToken && !EventsTokenWorker.IsBusy)
@@ -970,16 +854,16 @@ namespace XAU.ViewModels.Pages
             }
             catch (HttpRequestException ex) when (ex.StatusCode == HttpStatusCode.Unauthorized)
             {
-                QuarantineRejectedXauthCandidate(candidateUnderValidation, "401 Unauthorized");
-                ResetAttachStateAfterFailedValidation("401 Unauthorized");
+                QuarantineRejectedXauthCandidate(candidateUnderValidation);
+                ResetAttachStateAfterFailedValidation();
             }
-            catch (HttpRequestException ex)
+            catch (HttpRequestException)
             {
-                ResetAttachStateAfterFailedValidation($"HTTP validation error: {(ex.StatusCode.HasValue ? ex.StatusCode.ToString() : "no status")}: {ex.Message}");
+                ResetAttachStateAfterFailedValidation();
             }
-            catch (Exception ex)
+            catch (Exception)
             {
-                ResetAttachStateAfterFailedValidation($"{ex.GetType().Name}: {ex.Message}");
+                ResetAttachStateAfterFailedValidation();
             }
             finally
             {
@@ -1437,9 +1321,7 @@ namespace XAU.ViewModels.Pages
             InitComplete = false;
             _attachedXboxPid = 0;
             ResetXboxRestApiClient();
-            ResetXauthScanBackoff("profile/attach state cleared");
-            ResetXauthValidationFailureBackoff("profile/attach state cleared");
-            ResetRejectedXauthCandidateQuarantine("profile/attach state cleared");
+            ResetXauthScanState();
             GamerTag = "Gamertag: Unknown   ";
             Xuid = "XUID: Unknown";
             GamerPic = "pack://application:,,,/Assets/cirno.png";
