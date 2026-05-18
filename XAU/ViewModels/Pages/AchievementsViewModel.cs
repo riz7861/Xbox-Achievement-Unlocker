@@ -26,6 +26,11 @@ namespace XAU.ViewModels.Pages
         [ObservableProperty] private string _gameName = "";
         [ObservableProperty] private bool _isUnlockAllEnabled = false;
         [ObservableProperty] private string _searchText = "";
+        [ObservableProperty] private bool _isEventBased = false;
+        [ObservableProperty] private bool _isEventUnlockAvailable = false;
+        [ObservableProperty] private bool _useCustomEventUnlockTime = false;
+        [ObservableProperty] private DateTime? _customEventUnlockDate = DateTime.Today;
+        [ObservableProperty] private string _customEventUnlockTimeText = DateTime.Now.ToString("HH:mm:ss", CultureInfo.InvariantCulture);
         public static string TitleID = "0";
         private bool IsTitleIDValid = false;
         public static bool NewGame = false;
@@ -40,7 +45,6 @@ namespace XAU.ViewModels.Pages
 
         public static bool SpoofingUpdate = false;
         private bool IsFiltered = false;
-        private bool IsEventBased = false;
         private dynamic EventsData = (dynamic)(new JObject());
         public static string EventsToken;
 
@@ -241,6 +245,8 @@ namespace XAU.ViewModels.Pages
             DGAchievements.Clear();
             // clears unlocked achievements from dictionary
             _unlockedAchievements.Clear();
+            IsEventBased = false;
+            IsEventUnlockAvailable = false;
             if (!IsTitleIDValid)
                 return;
             if (!IsSelectedGame360)
@@ -279,10 +285,9 @@ namespace XAU.ViewModels.Pages
                             Unlockable = false;
                             IsEventBased = true;
                         }
-                        else
+                        else if (!IsEventBased)
                         {
                             Unlockable = true;
-                            IsEventBased = false;
                         }
                     }
                     var rewardnameplaceholder = "";
@@ -464,6 +469,7 @@ namespace XAU.ViewModels.Pages
                 if (SupportedGames.Contains(int.Parse(TitleIDOverride)))
                 {
                     Unlockable = true;
+                    IsEventUnlockAvailable = true;
                     EventsData = (dynamic)(JObject)data[TitleIDOverride];
                     foreach (var achievement in DGAchievements)
                     {
@@ -554,7 +560,11 @@ namespace XAU.ViewModels.Pages
 
                 // TODO: move this over to the rest api?
                 var requestbody = File.ReadAllText(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments) + $"\\XAU\\Events\\{TitleIDOverride}.json");
-                DateTime timestamp = DateTime.UtcNow;
+                // Experimental: Xbox may ignore this event telemetry timestamp and use server-side receipt time.
+                if (!TryGetEventUnlockTimestampUtc(out DateTime timestamp))
+                {
+                    return;
+                }
                 foreach (var i in EventsData.Achievements[DGAchievements[AchievementIndex].ID.ToString()])
                 {
                     var ReplacementData = i.Value;
@@ -623,6 +633,38 @@ namespace XAU.ViewModels.Pages
 
             }
 
+        }
+
+        private bool TryGetEventUnlockTimestampUtc(out DateTime timestampUtc)
+        {
+            timestampUtc = DateTime.UtcNow;
+            if (!UseCustomEventUnlockTime)
+            {
+                return true;
+            }
+
+            if (CustomEventUnlockDate == null)
+            {
+                _snackbarService.Show("Error: Invalid Event Time", "Select a valid event unlock date.", ControlAppearance.Danger,
+                    new SymbolIcon(SymbolRegular.ErrorCircle24), _snackbarDuration);
+                return false;
+            }
+
+            var timeText = CustomEventUnlockTimeText?.Trim();
+            if (string.IsNullOrWhiteSpace(timeText) ||
+                (!TimeSpan.TryParse(timeText, CultureInfo.CurrentCulture, out var timeOfDay) &&
+                 !TimeSpan.TryParse(timeText, CultureInfo.InvariantCulture, out timeOfDay)) ||
+                timeOfDay < TimeSpan.Zero ||
+                timeOfDay >= TimeSpan.FromDays(1))
+            {
+                _snackbarService.Show("Error: Invalid Event Time", "Enter the event unlock time as HH:mm or HH:mm:ss.", ControlAppearance.Danger,
+                    new SymbolIcon(SymbolRegular.ErrorCircle24), _snackbarDuration);
+                return false;
+            }
+
+            var localTimestamp = DateTime.SpecifyKind(CustomEventUnlockDate.Value.Date.Add(timeOfDay), DateTimeKind.Local);
+            timestampUtc = localTimestamp.ToUniversalTime();
+            return true;
         }
 
         [RelayCommand]
