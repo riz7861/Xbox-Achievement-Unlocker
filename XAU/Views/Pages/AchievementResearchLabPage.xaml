@@ -83,6 +83,9 @@
                                                             <DataTrigger Binding="{Binding Compatibility, Mode=OneWay}" Value="Research Supported">
                                                                 <Setter Property="Background" Value="#49388E3C"/>
                                                             </DataTrigger>
+                                                            <DataTrigger Binding="{Binding Compatibility, Mode=OneWay}" Value="Multi-placeholder Payload Analysis">
+                                                                <Setter Property="Background" Value="#49B76E00"/>
+                                                            </DataTrigger>
                                                             <DataTrigger Binding="{Binding Compatibility, Mode=OneWay}" Value="Unsupported">
                                                                 <Setter Property="Background" Value="#497F8C8D"/>
                                                             </DataTrigger>
@@ -161,6 +164,44 @@
                     <DataGridTextColumn Header="Target" Binding="{Binding Target, Mode=OneWay}" Width="*"/>
                 </DataGrid.Columns>
             </DataGrid>
+
+            <Expander
+                Margin="0,0,0,10"
+                Header="Selected achievement mapped payload analysis (read-only)"
+                IsExpanded="True">
+                <StackPanel Margin="0,8,0,0">
+                    <TextBlock
+                        Margin="0,0,0,8"
+                        Text="{Binding ViewModel.SelectedMappingInfo, Mode=OneWay}"
+                        TextWrapping="Wrap"/>
+                    <DataGrid
+                        Height="170"
+                        Margin="0,0,0,8"
+                        AutoGenerateColumns="False"
+                        CanUserAddRows="False"
+                        CanUserDeleteRows="False"
+                        CanUserReorderColumns="False"
+                        IsReadOnly="True"
+                        ItemsSource="{Binding ViewModel.SelectedAchievementReplacements, Mode=OneWay}">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="Mapping entry" Binding="{Binding Source, Mode=OneWay}" Width="180"/>
+                            <DataGridTextColumn Header="Replacement type" Binding="{Binding ReplacementType, Mode=OneWay}" Width="150"/>
+                            <DataGridTextColumn Header="Target placeholder" Binding="{Binding Target, Mode=OneWay}" Width="190"/>
+                            <DataGridTextColumn Header="Sanitized replacement" Binding="{Binding Replacement, Mode=OneWay}" Width="4*"/>
+                        </DataGrid.Columns>
+                    </DataGrid>
+                    <TextBlock Margin="0,0,0,4" FontWeight="SemiBold" Text="Reconstructed sanitized payload preview"/>
+                    <TextBox
+                        Height="260"
+                        AcceptsReturn="True"
+                        FontFamily="Consolas"
+                        HorizontalScrollBarVisibility="Auto"
+                        IsReadOnly="True"
+                        Text="{Binding ViewModel.MappedPayloadPreview, Mode=OneWay}"
+                        TextWrapping="NoWrap"
+                        VerticalScrollBarVisibility="Auto"/>
+                </StackPanel>
+            </Expander>
 
             <Expander
                 Margin="0,0,0,10"

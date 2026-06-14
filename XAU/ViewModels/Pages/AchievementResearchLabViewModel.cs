@@ -28,6 +28,9 @@ public partial class AchievementResearchLabViewModel : ObservableObject, INaviga
     [ObservableProperty] private bool _canUseProgressionDataTemplate;
     [ObservableProperty] private ObservableCollection<ResearchAchievement> _achievements = new();
     [ObservableProperty] private ResearchAchievement? _selectedAchievement;
+    [ObservableProperty] private ObservableCollection<ResearchReplacementDetail> _selectedAchievementReplacements = new();
+    [ObservableProperty] private string _selectedMappingInfo = "Select an achievement to inspect its mapped replacements.";
+    [ObservableProperty] private string _mappedPayloadPreview = "No mapped payload preview is available.";
     [ObservableProperty] private string _progressionData = "";
     [ObservableProperty] private string _payloadPreview = "";
     [ObservableProperty] private string _testStatus = "Select an achievement and preview one ProgressionData candidate.";
@@ -91,6 +94,8 @@ public partial class AchievementResearchLabViewModel : ObservableObject, INaviga
 
     partial void OnTitleSearchTextChanged(string value) => FilterResearchTitles();
 
+    partial void OnSelectedAchievementChanged(ResearchAchievement? value) => UpdateSelectedMappingAnalysis(value);
+
     partial void OnCanUseProgressionDataTemplateChanged(bool value)
     {
         SendOneTestEventCommand.NotifyCanExecuteChanged();
@@ -145,15 +150,21 @@ public partial class AchievementResearchLabViewModel : ObservableObject, INaviga
         EventTemplateInfo = BuildEventTemplateInfo(title);
         ProgressionData = "";
         PayloadPreview = "";
+        SelectedAchievement = null;
+        ClearSelectedMappingAnalysis();
         ResultDetails = "";
         ProposedMapping = "";
         RangeAttempts.Clear();
         TestStatus = title.HasProgressionDataTemplate
             ? "Select an achievement and preview one ProgressionData candidate."
-            : "Read-only analysis: this title does not have a usable REPLACEINDEX event template.";
+            : title.HasMappedMultiPlaceholderTemplate
+                ? "Multi-placeholder payload analysis is read-only. Select a mapped achievement to inspect its reconstructed payload."
+                : "Read-only analysis: this title does not have a usable REPLACEINDEX event template.";
         RangeStatus = title.HasProgressionDataTemplate
             ? "Range tester is idle."
-            : "Range tester unavailable: no usable REPLACEINDEX event template.";
+            : title.HasMappedMultiPlaceholderTemplate
+                ? "Range tester unavailable for multi-placeholder payload templates."
+                : "Range tester unavailable: no usable REPLACEINDEX event template.";
         LoadHistory();
         await LoadAchievements();
     }
@@ -582,9 +593,17 @@ public partial class AchievementResearchLabViewModel : ObservableObject, INaviga
                     var placeholders = GetTemplatePlaceholders(templateText);
                     var replacementTypes = GetReplacementTypes(mappings);
                     var usesReplaceIndex = placeholders.Contains("REPLACEINDEX");
-                    var hasUsableTemplate = template != null && usesReplaceIndex;
+                    var hasMappedMultiPlaceholderTemplate = HasMappedMultiPlaceholderTemplate(placeholders, mappings);
+                    var hasUsableTemplate = template != null && usesReplaceIndex && !hasMappedMultiPlaceholderTemplate;
+                    var templateStyle = hasMappedMultiPlaceholderTemplate
+                        ? ResearchTemplateStyle.MultiPlaceholderPayload
+                        : hasUsableTemplate
+                            ? ResearchTemplateStyle.ReplaceIndexSimple
+                            : ResearchTemplateStyle.ReadOnlyUnsupported;
                     var compatibility = hasUsableTemplate
                         ? ResearchCompatibility.ResearchSupported
+                        : hasMappedMultiPlaceholderTemplate
+                            ? ResearchCompatibility.MultiPlaceholderPayloadAnalysis
                         : game != null || mappedCount > 0 || template != null
                             ? ResearchCompatibility.ReadOnlyAnalysis
                             : ResearchCompatibility.Unsupported;
@@ -596,7 +615,9 @@ public partial class AchievementResearchLabViewModel : ObservableObject, INaviga
                     {
                         scid = templateScid;
                     }
-                    else if (template != null && template.TryGetValue("data", out var dataToken))
+                    else if (!hasMappedMultiPlaceholderTemplate
+                        && template != null
+                        && template.TryGetValue("data", out var dataToken))
                     {
                         if (dataToken is not JObject)
                             AddDiscoveryDiagnostic(templatePath, titleId, $"Expected data object but found {dataToken.Type}.");
@@ -630,11 +651,15 @@ public partial class AchievementResearchLabViewModel : ObservableObject, INaviga
                             .OrderBy(value => value)
                             .ToList()),
                         TemplatePath = templatePath,
-                        TemplateEventName = templateEventName ?? "<template unavailable>",
+                        TemplateEventName = hasMappedMultiPlaceholderTemplate
+                            ? "<mapped per achievement>"
+                            : templateEventName ?? "<template unavailable>",
                         HasEventTemplate = hasEventTemplate,
                         HasDataMappings = mappedCount > 0,
                         HasProgressionDataTemplate = hasUsableTemplate,
+                        HasMappedMultiPlaceholderTemplate = hasMappedMultiPlaceholderTemplate,
                         UsesReplaceIndex = usesReplaceIndex,
+                        TemplateStyle = templateStyle,
                         ReplacementTypes = FormatDiscoveryValues(replacementTypes),
                         OtherPlaceholders = FormatDiscoveryValues(placeholders
                             .Where(placeholder => placeholder != "REPLACEINDEX")
@@ -659,6 +684,7 @@ public partial class AchievementResearchLabViewModel : ObservableObject, INaviga
             TitleListStatus =
                 $"Discovery scanned {scanned}, loaded {titles.Count}, skipped {skipped}, errors {DiscoveryDiagnostics.Count}. " +
                 $"{titles.Count(title => title.Compatibility == ResearchCompatibility.ResearchSupported)} research supported, " +
+                $"{titles.Count(title => title.Compatibility == ResearchCompatibility.MultiPlaceholderPayloadAnalysis)} multi-placeholder payload analysis, " +
                 $"{titles.Count(title => title.Compatibility == ResearchCompatibility.ReadOnlyAnalysis)} read-only analysis, " +
                 $"{titles.Count(title => title.Compatibility == ResearchCompatibility.Unsupported)} unsupported.";
             DiscoveryDiagnosticsSummary =
@@ -706,6 +732,7 @@ public partial class AchievementResearchLabViewModel : ObservableObject, INaviga
             return $"Compatibility: {title.Compatibility}{Environment.NewLine}" +
                 $"Event template exists: {title.HasEventTemplate}{Environment.NewLine}" +
                 $"Data.json mappings: {title.HasDataMappings} ({title.MappedCount}){Environment.NewLine}" +
+                $"Template style: {title.TemplateStyle}{Environment.NewLine}" +
                 $"Template: {(title.HasEventTemplate ? "present but unreadable" : "unavailable")}{Environment.NewLine}" +
                 $"Replacement types: {title.ReplacementTypes}{Environment.NewLine}" +
                 $"Testing: read-only analysis only";
@@ -717,6 +744,7 @@ public partial class AchievementResearchLabViewModel : ObservableObject, INaviga
             $"Compatibility: {title.Compatibility}{Environment.NewLine}" +
             $"Event template exists: {title.HasEventTemplate}{Environment.NewLine}" +
             $"Data.json mappings: {title.HasDataMappings} ({title.MappedCount}){Environment.NewLine}" +
+            $"Template style: {title.TemplateStyle}{Environment.NewLine}" +
             $"Placeholders: {(placeholders.Count == 0 ? "<none>" : string.Join(", ", placeholders))}{Environment.NewLine}" +
             $"Replacement types: {title.ReplacementTypes}{Environment.NewLine}" +
             $"ProgressionData / REPLACEINDEX testing: {(title.HasProgressionDataTemplate ? "available" : "unavailable; read-only analysis only")}";
@@ -742,6 +770,29 @@ public partial class AchievementResearchLabViewModel : ObservableObject, INaviga
                 .Distinct()
                 .OrderBy(value => value)
                 .ToList();
+
+    private static bool HasMappedMultiPlaceholderTemplate(IReadOnlyCollection<string> placeholders, JObject? mappings)
+    {
+        var mappedPlaceholders = placeholders
+            .Where(placeholder => placeholder is not "REPLACEINDEX" and not "REPLACETIME" and not "REPLACESEQ" and not "REPLACEXUID")
+            .ToHashSet(StringComparer.Ordinal);
+        if (mappedPlaceholders.Count == 0 || mappings == null)
+            return false;
+
+        return mappings.Properties()
+            .Select(property => property.Value as JObject)
+            .Where(mapping => mapping != null)
+            .Any(mapping => mappedPlaceholders.All(placeholder => GetReplacementTargets(mapping).Contains(placeholder)));
+    }
+
+    private static HashSet<string> GetReplacementTargets(JObject? mapping) =>
+        mapping == null
+            ? []
+            : mapping.Properties()
+                .Select(property => TryGetString(property.Value, "Target", out var target) ? target : null)
+                .Where(target => !string.IsNullOrWhiteSpace(target))
+                .Select(target => target!)
+                .ToHashSet(StringComparer.Ordinal);
 
     private static string FormatDiscoveryValues(IReadOnlyCollection<string> values) =>
         values.Count == 0 ? "<none>" : string.Join(", ", values);
@@ -1060,11 +1111,153 @@ public partial class AchievementResearchLabViewModel : ObservableObject, INaviga
         return mappings;
     }
 
+    private void ClearSelectedMappingAnalysis()
+    {
+        SelectedAchievementReplacements.Clear();
+        SelectedMappingInfo = "Select an achievement to inspect its mapped replacements.";
+        MappedPayloadPreview = "No mapped payload preview is available.";
+    }
+
+    private void UpdateSelectedMappingAnalysis(ResearchAchievement? achievement)
+    {
+        ClearSelectedMappingAnalysis();
+        if (SelectedResearchTitle == null || achievement == null)
+            return;
+
+        var mappings = LoadSelectedTitleMappings();
+        if (!TryGetObject(mappings, achievement.Id, out var mapping))
+        {
+            SelectedMappingInfo = $"Achievement {achievement.Id} has no Data.json event mapping.";
+            return;
+        }
+
+        var achievementMapping = mapping!;
+        var replacements = new List<ResearchReplacementDetail>();
+        foreach (var property in achievementMapping.Properties())
+        {
+            if (!TryGetObject(property.Value, out var replacement))
+                continue;
+
+            TryGetString(replacement, "ReplacementType", out var replacementType);
+            TryGetString(replacement, "Target", out var target);
+            TryGetString(replacement, "Replacement", out var replacementValue);
+            TryGetString(replacement, "Min", out var min);
+            TryGetString(replacement, "Max", out var max);
+            replacements.Add(new ResearchReplacementDetail
+            {
+                Source = property.Name,
+                ReplacementType = replacementType ?? "<unknown>",
+                Target = target ?? "<missing>",
+                Replacement = SanitizeReplacementValue(replacementValue, min, max)
+            });
+        }
+
+        SelectedAchievementReplacements = new ObservableCollection<ResearchReplacementDetail>(replacements);
+        SelectedMappingInfo =
+            $"{SelectedResearchTitle.TemplateStyle}: achievement {achievement.Id} - {achievement.Name} has {replacements.Count} mapped replacement(s). " +
+            (SelectedResearchTitle.HasMappedMultiPlaceholderTemplate
+                ? "Payload reconstruction is read-only; sending is disabled for multi-placeholder templates."
+                : "The existing REPLACEINDEX research tester remains available where supported.");
+        MappedPayloadPreview = BuildMappedPayloadPreview(achievementMapping);
+    }
+
+    private string BuildMappedPayloadPreview(JObject mapping)
+    {
+        if (SelectedResearchTitle == null)
+            return "No title is selected.";
+
+        var requestBody = TryReadTemplate(SelectedResearchTitle.TemplatePath);
+        if (requestBody == null)
+            return "The event template could not be read.";
+
+        foreach (var property in mapping.Properties())
+        {
+            if (!TryGetObject(property.Value, out var replacement)
+                || !TryGetString(replacement, "ReplacementType", out var replacementType)
+                || !TryGetString(replacement, "Target", out var target))
+                return $"Payload preview unavailable: mapping entry {property.Name} is malformed.";
+
+            string? previewValue;
+            switch (replacementType)
+            {
+                case "Replace":
+                    TryGetString(replacement, "Replacement", out previewValue);
+                    break;
+                case "RangeInt":
+                case "RangeFloat":
+                    TryGetString(replacement, "Min", out previewValue);
+                    break;
+                case "StupidFuckingLDAPTimestamp":
+                    previewValue = "0";
+                    break;
+                default:
+                    return $"Payload preview unavailable: unsupported replacement type {replacementType}.";
+            }
+
+            if (string.IsNullOrWhiteSpace(target) || previewValue == null)
+                return $"Payload preview unavailable: mapping entry {property.Name} is incomplete.";
+
+            requestBody = requestBody.Replace(target, previewValue);
+        }
+
+        requestBody = requestBody
+            .Replace("REPLACESEQ", "0")
+            .Replace("REPLACEXUID", "REDACTED_XUID")
+            .Replace("REPLACETIME", "1970-01-01T00:00:00.0000000Z");
+
+        var unresolved = GetTemplatePlaceholders(requestBody);
+        if (unresolved.Count > 0)
+            return $"Payload preview unavailable: unresolved placeholders {string.Join(", ", unresolved)}.";
+
+        try
+        {
+            var payload = JToken.Parse(requestBody);
+            RedactPayload(payload);
+            return payload.ToString(Formatting.Indented);
+        }
+        catch (Exception ex)
+        {
+            return $"Payload preview unavailable after applying mappings: {ex.Message}";
+        }
+    }
+
+    private static string SanitizeReplacementValue(string? replacement, string? min, string? max)
+    {
+        if (replacement == null)
+            return min == null && max == null ? "<none>" : $"Range {min ?? "<none>"} to {max ?? "<none>"}";
+
+        try
+        {
+            var value = JToken.Parse(replacement);
+            RedactPayload(value);
+            return value.ToString(Formatting.None);
+        }
+        catch
+        {
+            return replacement.Replace("REPLACEXUID", "REDACTED_XUID");
+        }
+    }
+
+    private static void RedactPayload(JToken payload)
+    {
+        var sensitiveNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "authorization", "deviceId", "iKey", "localId", "playerSessionId", "ticketKeys", "userId", "xuid"
+        };
+        foreach (var property in (payload as JContainer)?.Descendants().OfType<JProperty>()
+            .Where(property => sensitiveNames.Contains(property.Name))
+            .ToList() ?? [])
+        {
+            property.Value = "[REDACTED]";
+        }
+    }
+
     private static string FormatMappingStatus(JObject? mapping)
     {
         if (mapping == null)
             return "Unsupported: missing event mapping";
 
+        var targets = GetReplacementTargets(mapping);
         string? progressionData = null;
         foreach (var property in mapping.Properties())
         {
@@ -1075,7 +1268,7 @@ public partial class AchievementResearchLabViewModel : ObservableObject, INaviga
             break;
         }
         return string.IsNullOrWhiteSpace(progressionData)
-            ? "Mapped"
+            ? targets.Count == 0 ? "Mapped" : $"Mapped: {string.Join(", ", targets.OrderBy(target => target))}"
             : $"Mapped: ProgressionData {progressionData}";
     }
 
@@ -1677,6 +1870,14 @@ public sealed class ResearchAchievement
     public string Target { get; set; } = "";
 }
 
+public sealed class ResearchReplacementDetail
+{
+    public string Source { get; set; } = "";
+    public string ReplacementType { get; set; } = "";
+    public string Target { get; set; } = "";
+    public string Replacement { get; set; } = "";
+}
+
 public sealed class ResearchTitleCard
 {
     public string TitleId { get; set; } = "";
@@ -1692,28 +1893,39 @@ public sealed class ResearchTitleCard
     public bool HasEventTemplate { get; set; }
     public bool HasDataMappings { get; set; }
     public bool HasProgressionDataTemplate { get; set; }
+    public bool HasMappedMultiPlaceholderTemplate { get; set; }
     public bool UsesReplaceIndex { get; set; }
+    public string TemplateStyle { get; set; } = ResearchTemplateStyle.ReadOnlyUnsupported;
     public string ReplacementTypes { get; set; } = "<none>";
     public string OtherPlaceholders { get; set; } = "<none>";
     public string Compatibility { get; set; } = ResearchCompatibility.Unsupported;
     public int CompatibilitySortOrder => Compatibility switch
     {
         ResearchCompatibility.ResearchSupported => 0,
-        ResearchCompatibility.ReadOnlyAnalysis => 1,
-        _ => 2
+        ResearchCompatibility.MultiPlaceholderPayloadAnalysis => 1,
+        ResearchCompatibility.ReadOnlyAnalysis => 2,
+        _ => 3
     };
     public string KnownHitsDisplay => $"Hits: {KnownHits}";
     public string KnownMissesDisplay => $"Misses: {KnownMisses}";
     public string DiscoverySummary =>
-        $"Template: {(HasEventTemplate ? "yes" : "no")} | Mappings: {(HasDataMappings ? "yes" : "no")} | REPLACEINDEX: {(UsesReplaceIndex ? "yes" : "no")}";
+        $"Style: {TemplateStyle} | Template: {(HasEventTemplate ? "yes" : "no")} | Mappings: {(HasDataMappings ? "yes" : "no")}";
     public string ReplacementSummary => $"Types: {ReplacementTypes}";
 }
 
 public static class ResearchCompatibility
 {
     public const string ResearchSupported = "Research Supported";
+    public const string MultiPlaceholderPayloadAnalysis = "Multi-placeholder Payload Analysis";
     public const string ReadOnlyAnalysis = "Read-Only Analysis";
     public const string Unsupported = "Unsupported";
+}
+
+public static class ResearchTemplateStyle
+{
+    public const string ReplaceIndexSimple = "REPLACEINDEX simple";
+    public const string MultiPlaceholderPayload = "multi-placeholder payload";
+    public const string ReadOnlyUnsupported = "read-only unsupported";
 }
 
 public sealed class ResearchDiscoveryDiagnostic
