@@ -582,8 +582,6 @@ public partial class AchievementResearchLabViewModel : ObservableObject, INaviga
                     var templatePath = Path.Combine(eventsPath, $"{titleId}.json");
                     var hasEventTemplate = File.Exists(templatePath);
                     var template = TryLoadTemplate(templatePath, out var templateError);
-                    if (templateError != null)
-                        AddDiscoveryDiagnostic(templatePath, titleId, templateError);
                     var templateText = TryReadTemplate(templatePath);
                     var history = AchievementMappingResearchStore.Load(titleId);
                     var mappedCount = mappings?.Properties().Count() ?? 0;
@@ -593,7 +591,19 @@ public partial class AchievementResearchLabViewModel : ObservableObject, INaviga
                     var placeholders = GetTemplatePlaceholders(templateText);
                     var replacementTypes = GetReplacementTypes(mappings);
                     var usesReplaceIndex = placeholders.Contains("REPLACEINDEX");
-                    var hasMappedMultiPlaceholderTemplate = HasMappedMultiPlaceholderTemplate(placeholders, mappings);
+                    var hasMappedMultiPlaceholderTemplate = HasMappedMultiPlaceholderTemplate(templateText, placeholders, mappings);
+                    var mappedTemplatePlaceholders = GetMappedTemplatePlaceholders(placeholders);
+                    if (mappedTemplatePlaceholders.Count > 0
+                        && mappings != null
+                        && !hasMappedMultiPlaceholderTemplate)
+                    {
+                        AddDiscoveryDiagnostic(
+                            dataPath,
+                            titleId,
+                            $"No achievement mapping reconstructed all template placeholders: {string.Join(", ", mappedTemplatePlaceholders)}.");
+                    }
+                    if (templateError != null && !hasMappedMultiPlaceholderTemplate)
+                        AddDiscoveryDiagnostic(templatePath, titleId, templateError);
                     var hasUsableTemplate = template != null && usesReplaceIndex && !hasMappedMultiPlaceholderTemplate;
                     var templateStyle = hasMappedMultiPlaceholderTemplate
                         ? ResearchTemplateStyle.MultiPlaceholderPayload
@@ -771,19 +781,26 @@ public partial class AchievementResearchLabViewModel : ObservableObject, INaviga
                 .OrderBy(value => value)
                 .ToList();
 
-    private static bool HasMappedMultiPlaceholderTemplate(IReadOnlyCollection<string> placeholders, JObject? mappings)
+    private static bool HasMappedMultiPlaceholderTemplate(
+        string? templateText,
+        IReadOnlyCollection<string> placeholders,
+        JObject? mappings)
     {
-        var mappedPlaceholders = placeholders
-            .Where(placeholder => placeholder is not "REPLACEINDEX" and not "REPLACETIME" and not "REPLACESEQ" and not "REPLACEXUID")
-            .ToHashSet(StringComparer.Ordinal);
-        if (mappedPlaceholders.Count == 0 || mappings == null)
+        var mappedPlaceholders = GetMappedTemplatePlaceholders(placeholders);
+        if (templateText == null || mappedPlaceholders.Count == 0 || mappings == null)
             return false;
 
         return mappings.Properties()
             .Select(property => property.Value as JObject)
             .Where(mapping => mapping != null)
-            .Any(mapping => mappedPlaceholders.All(placeholder => GetReplacementTargets(mapping).Contains(placeholder)));
+            .Any(mapping => mappedPlaceholders.All(placeholder => GetReplacementTargets(mapping).Contains(placeholder))
+                && TryReconstructMappedPayload(templateText, mapping!, out _, out _));
     }
+
+    private static HashSet<string> GetMappedTemplatePlaceholders(IEnumerable<string> placeholders) =>
+        placeholders
+            .Where(placeholder => placeholder is not "REPLACEINDEX" and not "REPLACETIME" and not "REPLACESEQ" and not "REPLACEXUID")
+            .ToHashSet(StringComparer.Ordinal);
 
     private static HashSet<string> GetReplacementTargets(JObject? mapping) =>
         mapping == null
@@ -1159,6 +1176,8 @@ public partial class AchievementResearchLabViewModel : ObservableObject, INaviga
                 ? "Payload reconstruction is read-only; sending is disabled for multi-placeholder templates."
                 : "The existing REPLACEINDEX research tester remains available where supported.");
         MappedPayloadPreview = BuildMappedPayloadPreview(achievementMapping);
+        if (MappedPayloadPreview.StartsWith("Payload preview unavailable", StringComparison.Ordinal))
+            SelectedMappingInfo += $" Mapping diagnostic: {MappedPayloadPreview}";
     }
 
     private string BuildMappedPayloadPreview(JObject mapping)
@@ -1170,12 +1189,31 @@ public partial class AchievementResearchLabViewModel : ObservableObject, INaviga
         if (requestBody == null)
             return "The event template could not be read.";
 
+        if (!TryReconstructMappedPayload(requestBody, mapping, out var payload, out var error))
+            return $"Payload preview unavailable: {error}";
+
+        RedactPayload(payload!);
+        return payload!.ToString(Formatting.Indented);
+    }
+
+    private static bool TryReconstructMappedPayload(
+        string templateText,
+        JObject mapping,
+        out JToken? payload,
+        out string? error)
+    {
+        payload = null;
+        error = null;
+        var requestBody = templateText;
         foreach (var property in mapping.Properties())
         {
             if (!TryGetObject(property.Value, out var replacement)
                 || !TryGetString(replacement, "ReplacementType", out var replacementType)
                 || !TryGetString(replacement, "Target", out var target))
-                return $"Payload preview unavailable: mapping entry {property.Name} is malformed.";
+            {
+                error = $"mapping entry {property.Name} is malformed.";
+                return false;
+            }
 
             string? previewValue;
             switch (replacementType)
@@ -1191,33 +1229,40 @@ public partial class AchievementResearchLabViewModel : ObservableObject, INaviga
                     previewValue = "0";
                     break;
                 default:
-                    return $"Payload preview unavailable: unsupported replacement type {replacementType}.";
+                    error = $"unsupported replacement type {replacementType}.";
+                    return false;
             }
 
             if (string.IsNullOrWhiteSpace(target) || previewValue == null)
-                return $"Payload preview unavailable: mapping entry {property.Name} is incomplete.";
+            {
+                error = $"mapping entry {property.Name} is incomplete.";
+                return false;
+            }
 
             requestBody = requestBody.Replace(target, previewValue);
         }
 
         requestBody = requestBody
             .Replace("REPLACESEQ", "0")
-            .Replace("REPLACEXUID", "REDACTED_XUID")
+            .Replace("REPLACEXUID", "0")
             .Replace("REPLACETIME", "1970-01-01T00:00:00.0000000Z");
 
         var unresolved = GetTemplatePlaceholders(requestBody);
         if (unresolved.Count > 0)
-            return $"Payload preview unavailable: unresolved placeholders {string.Join(", ", unresolved)}.";
+        {
+            error = $"unresolved placeholders {string.Join(", ", unresolved)}.";
+            return false;
+        }
 
         try
         {
-            var payload = JToken.Parse(requestBody);
-            RedactPayload(payload);
-            return payload.ToString(Formatting.Indented);
+            payload = JToken.Parse(requestBody);
+            return true;
         }
         catch (Exception ex)
         {
-            return $"Payload preview unavailable after applying mappings: {ex.Message}";
+            error = $"invalid JSON after applying mappings: {ex.Message}";
+            return false;
         }
     }
 
@@ -1228,7 +1273,7 @@ public partial class AchievementResearchLabViewModel : ObservableObject, INaviga
 
         try
         {
-            var value = JToken.Parse(replacement);
+            var value = JToken.Parse(replacement.Replace("REPLACEXUID", "0"));
             RedactPayload(value);
             return value.ToString(Formatting.None);
         }
