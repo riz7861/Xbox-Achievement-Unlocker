@@ -3,6 +3,7 @@ using System.Globalization;
 using System.IO;
 using System.Net.Http;
 using System.Text;
+using System.Text.RegularExpressions;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using Wpf.Ui.Common;
@@ -12,15 +13,19 @@ using XAU.Services;
 
 namespace XAU.ViewModels.Pages;
 
-public partial class QuantumBreakResearchViewModel : ObservableObject, INavigationAware
+public partial class AchievementResearchLabViewModel : ObservableObject, INavigationAware
 {
-    private const string QuantumBreakTitleId = "333628240";
-    private const string QuantumBreakScid = "636a0100-392d-4116-9c4f-e0c513e2c350";
-
     [ObservableProperty] private string _eventTokenStatus = "Events token status has not been checked.";
-    [ObservableProperty] private string _achievementStatus = "Loading Quantum Break achievements...";
-    [ObservableProperty] private ObservableCollection<QuantumBreakResearchAchievement> _achievements = new();
-    [ObservableProperty] private QuantumBreakResearchAchievement? _selectedAchievement;
+    [ObservableProperty] private string _achievementStatus = "Select an event-based title to begin research.";
+    [ObservableProperty] private string _titleSearchText = "";
+    [ObservableProperty] private string _titleListStatus = "Loading event-based research titles...";
+    [ObservableProperty] private ObservableCollection<ResearchTitleCard> _researchTitles = new();
+    [ObservableProperty] private ObservableCollection<ResearchTitleCard> _filteredResearchTitles = new();
+    [ObservableProperty] private ResearchTitleCard? _selectedResearchTitle;
+    [ObservableProperty] private string _eventTemplateInfo = "Select a title to inspect its event template.";
+    [ObservableProperty] private bool _canUseProgressionDataTemplate;
+    [ObservableProperty] private ObservableCollection<ResearchAchievement> _achievements = new();
+    [ObservableProperty] private ResearchAchievement? _selectedAchievement;
     [ObservableProperty] private string _progressionData = "";
     [ObservableProperty] private string _payloadPreview = "";
     [ObservableProperty] private string _testStatus = "Select an achievement and preview one ProgressionData candidate.";
@@ -36,27 +41,28 @@ public partial class QuantumBreakResearchViewModel : ObservableObject, INavigati
     [ObservableProperty] private bool _stopOnSelectedAchievementChange = true;
     [ObservableProperty] private bool _stopOnAnyAchievementChange = true;
     [ObservableProperty] private bool _watchSelectedAchievementOnly;
-    [ObservableProperty] private bool _watchAllQuantumBreakAchievements = true;
+    [ObservableProperty] private bool _watchAllAchievements = true;
     [ObservableProperty] private bool _isRangeTesting;
     [ObservableProperty] private string _rangeStatus = "Range tester is idle.";
     [ObservableProperty] private string _rangeCurrentStatus = "No candidate is running.";
     [ObservableProperty] private string _proposedMapping = "";
-    [ObservableProperty] private ObservableCollection<QuantumBreakRangeAttemptRow> _rangeAttempts = new();
+    [ObservableProperty] private ObservableCollection<ResearchRangeAttemptRow> _rangeAttempts = new();
     [ObservableProperty] private string _candidateHistorySummary = "No tested-candidate summary loaded.";
     [ObservableProperty] private string _searchText = "";
     [ObservableProperty] private string _historyStatus = "No mapping research history loaded.";
-    [ObservableProperty] private ObservableCollection<QuantumBreakMappingResearchEntry> _entries = new();
-    [ObservableProperty] private QuantumBreakMappingResearchEntry? _selectedEntry;
-    [ObservableProperty] private ObservableCollection<QuantumBreakRequirementAnalysisRow> _requirementAnalysisRows = new();
-    [ObservableProperty] private string _requirementAnalysisSummary = "Load Quantum Break achievements to analyse requirement structures.";
+    [ObservableProperty] private ObservableCollection<AchievementMappingResearchEntry> _entries = new();
+    [ObservableProperty] private AchievementMappingResearchEntry? _selectedEntry;
+    [ObservableProperty] private ObservableCollection<ResearchRequirementAnalysisRow> _requirementAnalysisRows = new();
+    [ObservableProperty] private string _requirementAnalysisSummary = "Load a title's achievements to analyse requirement structures.";
 
     private readonly ISnackbarService _snackbarService;
     private readonly IContentDialogService _contentDialogService;
     private readonly TimeSpan _snackbarDuration = TimeSpan.FromSeconds(2);
     private CancellationTokenSource? _rangeCancellation;
-    private IReadOnlyList<QuantumBreakMappingResearchEntry> _allHistoryEntries = [];
+    private IReadOnlyList<AchievementMappingResearchEntry> _allHistoryEntries = [];
+    private JObject? _eventData;
 
-    public QuantumBreakResearchViewModel(
+    public AchievementResearchLabViewModel(
         ISnackbarService snackbarService,
         IContentDialogService contentDialogService)
     {
@@ -64,19 +70,30 @@ public partial class QuantumBreakResearchViewModel : ObservableObject, INavigati
         _contentDialogService = contentDialogService;
     }
 
-    public string TitleInfo => $"Quantum Break | Title ID {QuantumBreakTitleId} | SCID {QuantumBreakScid}";
-    public string HistoryPath => QuantumBreakMappingResearchStore.FilePath;
+    public string TitleInfo => SelectedResearchTitle == null
+        ? "Achievement Mapping Research Lab"
+        : $"{SelectedResearchTitle.Name} | Title ID {SelectedResearchTitle.TitleId} | SCID {SelectedResearchTitle.Scid}";
+    public string HistoryPath => SelectedResearchTitle == null
+        ? "<select a title>"
+        : AchievementMappingResearchStore.FilePath(SelectedResearchTitle.TitleId);
 
     public async void OnNavigatedTo()
     {
-        LoadHistory();
         UpdateEventTokenStatus();
-        await LoadAchievements();
+        await LoadResearchTitles();
     }
 
     public void OnNavigatedFrom() => _rangeCancellation?.Cancel();
 
     partial void OnSearchTextChanged(string value) => LoadHistory();
+
+    partial void OnTitleSearchTextChanged(string value) => FilterResearchTitles();
+
+    partial void OnCanUseProgressionDataTemplateChanged(bool value)
+    {
+        SendOneTestEventCommand.NotifyCanExecuteChanged();
+        StartRangeTestCommand.NotifyCanExecuteChanged();
+    }
 
     partial void OnIsSendingChanged(bool value)
     {
@@ -96,12 +113,12 @@ public partial class QuantumBreakResearchViewModel : ObservableObject, INavigati
     partial void OnWatchSelectedAchievementOnlyChanged(bool value)
     {
         if (value)
-            WatchAllQuantumBreakAchievements = false;
-        else if (!WatchAllQuantumBreakAchievements)
-            WatchAllQuantumBreakAchievements = true;
+            WatchAllAchievements = false;
+        else if (!WatchAllAchievements)
+            WatchAllAchievements = true;
     }
 
-    partial void OnWatchAllQuantumBreakAchievementsChanged(bool value)
+    partial void OnWatchAllAchievementsChanged(bool value)
     {
         if (value)
             WatchSelectedAchievementOnly = false;
@@ -109,8 +126,35 @@ public partial class QuantumBreakResearchViewModel : ObservableObject, INavigati
             WatchSelectedAchievementOnly = true;
     }
 
-    [RelayCommand(CanExecute = nameof(CanRunRequest))]
+    [RelayCommand(CanExecute = nameof(CanRefreshAchievements))]
     private async Task RefreshAchievements() => await LoadAchievements();
+
+    [RelayCommand]
+    private async Task SelectResearchTitle(ResearchTitleCard title)
+    {
+        if (IsSending || IsRangeTesting)
+            return;
+
+        SelectedResearchTitle = title;
+        OnPropertyChanged(nameof(TitleInfo));
+        OnPropertyChanged(nameof(HistoryPath));
+        RefreshAchievementsCommand.NotifyCanExecuteChanged();
+        CanUseProgressionDataTemplate = title.HasProgressionDataTemplate;
+        EventTemplateInfo = BuildEventTemplateInfo(title);
+        ProgressionData = "";
+        PayloadPreview = "";
+        ResultDetails = "";
+        ProposedMapping = "";
+        RangeAttempts.Clear();
+        TestStatus = title.HasProgressionDataTemplate
+            ? "Select an achievement and preview one ProgressionData candidate."
+            : "Read-only analysis: this title does not have a usable REPLACEINDEX event template.";
+        RangeStatus = title.HasProgressionDataTemplate
+            ? "Range tester is idle."
+            : "Range tester unavailable: no usable REPLACEINDEX event template.";
+        LoadHistory();
+        await LoadAchievements();
+    }
 
     [RelayCommand]
     private void Preview()
@@ -130,7 +174,7 @@ public partial class QuantumBreakResearchViewModel : ObservableObject, INavigati
         }
     }
 
-    [RelayCommand(CanExecute = nameof(CanRunRequest))]
+    [RelayCommand(CanExecute = nameof(CanSendResearchEvent))]
     private async Task SendOneTestEvent()
     {
         if (!TryGetCandidate(out var candidate) || !CheckEventsToken())
@@ -156,7 +200,7 @@ public partial class QuantumBreakResearchViewModel : ObservableObject, INavigati
             var confirmation = await _contentDialogService.ShowSimpleDialogAsync(
                 new SimpleContentDialogCreateOptions
                 {
-                    Title = "Send one Quantum Break test event?",
+                    Title = $"Send one {SelectedResearchTitle!.Name} test event?",
                     Content =
                         $"Achievement: {selectedId} - {selectedName}\n" +
                         $"ProgressionData: {candidate}\n\n" +
@@ -198,7 +242,7 @@ public partial class QuantumBreakResearchViewModel : ObservableObject, INavigati
             }
 
             var entry = CreateHistoryEntry(candidate, selectedId, selectedName, before, after, changes, anyChanged);
-            QuantumBreakMappingResearchStore.Record(entry);
+            AchievementMappingResearchStore.Record(entry);
             ResultDetails = entry.Details;
             TestStatus = entry.Result switch
             {
@@ -221,7 +265,7 @@ public partial class QuantumBreakResearchViewModel : ObservableObject, INavigati
                     [],
                     $"Event sent; Xbox achievement data refresh failed: {ex.Message}",
                     true);
-                QuantumBreakMappingResearchStore.Record(entry);
+                AchievementMappingResearchStore.Record(entry);
                 ResultDetails = entry.Details;
                 TestStatus = "Test event sent; Xbox sync is delayed or the after snapshot could not be loaded.";
                 LoadHistory(true);
@@ -251,13 +295,13 @@ public partial class QuantumBreakResearchViewModel : ObservableObject, INavigati
         var confirmation = await _contentDialogService.ShowSimpleDialogAsync(
             new SimpleContentDialogCreateOptions
             {
-                Title = "Start controlled Quantum Break range test?",
+                Title = $"Start controlled {SelectedResearchTitle!.Name} range test?",
                 Content =
                     $"Achievement: {selectedId} - {selectedName}\n" +
                     $"Candidates: {start} through {end}\n" +
                     $"Maximum attempts: {maxAttempts}\n" +
                     $"Delay between attempts: {delaySeconds} second(s)\n\n" +
-                    $"Watch scope: {(WatchAllQuantumBreakAchievements ? "all Quantum Break achievements" : "selected achievement only")}\n\n" +
+                    $"Watch scope: {(WatchAllAchievements ? "all achievements for the selected title" : "selected achievement only")}\n\n" +
                     "Candidates are sent one at a time. Every attempt is persisted. No Data.json changes are made.",
                 PrimaryButtonText = "Start range test",
                 CloseButtonText = "Cancel"
@@ -293,7 +337,7 @@ public partial class QuantumBreakResearchViewModel : ObservableObject, INavigati
                 var result = await ExecuteRangeCandidate(
                     candidate, selectedId, selectedName, cancellationToken);
 
-                RangeAttempts.Add(QuantumBreakRangeAttemptRow.From(result.Entry, result.Status));
+                RangeAttempts.Add(ResearchRangeAttemptRow.From(result.Entry, result.Status));
                 ResultDetails = result.Entry.Details;
                 TestStatus = result.Status;
                 LoadHistory(true);
@@ -366,7 +410,7 @@ public partial class QuantumBreakResearchViewModel : ObservableObject, INavigati
             $"{ResultDetails}{Environment.NewLine}{Environment.NewLine}" +
             $"{RangeStatus}{Environment.NewLine}{ProposedMapping}{Environment.NewLine}{Environment.NewLine}" +
             $"Sanitized payload preview:{Environment.NewLine}{PayloadPreview}");
-        ShowCopied("Test Result Copied", "The visible Quantum Break test result was copied.");
+        ShowCopied("Test Result Copied", "The visible mapping research result was copied.");
     }
 
     [RelayCommand]
@@ -379,7 +423,7 @@ public partial class QuantumBreakResearchViewModel : ObservableObject, INavigati
             return;
 
         Clipboard.SetText(SelectedEntry.Details);
-        ShowCopied("Research Record Copied", "The selected Quantum Break mapping research record was copied.");
+        ShowCopied("Research Record Copied", "The selected mapping research record was copied.");
     }
 
     [RelayCommand]
@@ -405,14 +449,163 @@ public partial class QuantumBreakResearchViewModel : ObservableObject, INavigati
             $"{RequirementAnalysisSummary}{Environment.NewLine}{Environment.NewLine}" +
             "Achievement ID\tName\tState\tMapping status\tClassification\tRequirement ID\tCurrent\tTarget\tOperationType\tValueType\tRuleParticipationType\tShape" +
             $"{Environment.NewLine}{string.Join(Environment.NewLine, rows)}");
-        ShowCopied("Structure Analysis Copied", "The Quantum Break achievement structure analysis was copied.");
+        ShowCopied("Structure Analysis Copied", "The achievement structure analysis was copied.");
     }
 
-    private bool CanRunRequest() => !IsSending && !IsRangeTesting;
+    private bool CanRefreshAchievements() => SelectedResearchTitle != null && !IsSending && !IsRangeTesting;
 
-    private bool CanStartRangeTest() => !IsSending && !IsRangeTesting;
+    private bool CanSendResearchEvent() => CanRefreshAchievements() && CanUseProgressionDataTemplate;
+
+    private bool CanStartRangeTest() => CanSendResearchEvent();
 
     private bool CanStopRangeTest() => IsRangeTesting;
+
+    private async Task LoadResearchTitles()
+    {
+        try
+        {
+            var eventsPath = GetEventsPath();
+            var dataPath = Path.Combine(eventsPath, "Data.json");
+            _eventData = JObject.Parse(File.ReadAllText(dataPath));
+            var api = new XboxRestAPI(HomeViewModel.XAUTH);
+            TitlesList games;
+            try
+            {
+                games = await api.GetGamesListAsync(HomeViewModel.XUIDOnly) ?? new TitlesList();
+            }
+            catch
+            {
+                games = new TitlesList();
+            }
+            var gamesByTitleId = games.Titles
+                .Where(title => !string.IsNullOrWhiteSpace(title.TitleId))
+                .GroupBy(title => title.TitleId!)
+                .ToDictionary(group => group.Key, group => group.First());
+
+            var titles = _eventData.Properties().Select(property =>
+            {
+                gamesByTitleId.TryGetValue(property.Name, out var game);
+                var eventTitle = property.Value as JObject;
+                var mappings = eventTitle?["Achievements"] as JObject;
+                var templatePath = Path.Combine(eventsPath, $"{property.Name}.json");
+                var template = TryLoadTemplate(templatePath);
+                var templateText = TryReadTemplate(templatePath);
+                var history = AchievementMappingResearchStore.Load(property.Name);
+                var mappedCount = mappings?.Properties().Count() ?? 0;
+                var fullySupported = eventTitle?["FullySupported"]?.Value<bool>() == true;
+                return new ResearchTitleCard
+                {
+                    TitleId = property.Name,
+                    Name = game?.Name ?? $"Title {property.Name}",
+                    Image = string.IsNullOrWhiteSpace(game?.DisplayImage)
+                        ? "pack://application:,,,/Assets/cirno.png"
+                        : game.DisplayImage!,
+                    Scid = template?["data"]?["baseData"]?["serviceConfigId"]?.ToString()
+                        ?? game?.ServiceConfigId
+                        ?? "<unknown>",
+                    MappedCount = mappedCount,
+                    MissingCount = fullySupported ? "0" : "<load title>",
+                    KnownHits = FormatCandidateValues(history
+                        .Where(entry => entry.CandidateClassification != AchievementResearchClassifier.Unknown)
+                        .Select(entry => entry.ProgressionData)
+                        .Distinct()
+                        .OrderBy(value => value)
+                        .ToList()),
+                    KnownMisses = FormatCandidateValues(history
+                        .GroupBy(entry => entry.ProgressionData)
+                        .Where(group => group.All(entry => entry.Result == "No effect"))
+                        .Select(group => group.Key)
+                        .OrderBy(value => value)
+                        .ToList()),
+                    TemplatePath = templatePath,
+                    TemplateEventName = template?["name"]?.ToString() ?? "<template unavailable>",
+                    HasProgressionDataTemplate = templateText?.Contains(
+                        "REPLACEINDEX", StringComparison.Ordinal) == true
+                };
+            }).OrderByDescending(title => title.TitleId == AchievementMappingResearchStore.QuantumBreakTitleId)
+                .ThenBy(title => title.Name)
+                .ToList();
+
+            ResearchTitles = new ObservableCollection<ResearchTitleCard>(titles);
+            FilterResearchTitles();
+            TitleListStatus = $"Loaded {titles.Count} event-based research title(s).";
+
+            var quantumBreak = titles.FirstOrDefault(title =>
+                title.TitleId == AchievementMappingResearchStore.QuantumBreakTitleId);
+            if (quantumBreak != null)
+                await SelectResearchTitle(quantumBreak);
+        }
+        catch (Exception ex)
+        {
+            TitleListStatus = $"Research title load failed: {ex.Message}";
+            ResearchTitles.Clear();
+            FilteredResearchTitles.Clear();
+        }
+    }
+
+    private void FilterResearchTitles()
+    {
+        var filtered = ResearchTitles.Where(title =>
+            string.IsNullOrWhiteSpace(TitleSearchText)
+            || title.Name.Contains(TitleSearchText, StringComparison.OrdinalIgnoreCase)
+            || title.TitleId.Contains(TitleSearchText, StringComparison.OrdinalIgnoreCase)
+            || title.Scid.Contains(TitleSearchText, StringComparison.OrdinalIgnoreCase));
+        FilteredResearchTitles = new ObservableCollection<ResearchTitleCard>(filtered);
+    }
+
+    private void RefreshResearchTitleCards()
+    {
+        ResearchTitles = new ObservableCollection<ResearchTitleCard>(ResearchTitles);
+        FilterResearchTitles();
+    }
+
+    private static string BuildEventTemplateInfo(ResearchTitleCard title)
+    {
+        var template = TryLoadTemplate(title.TemplatePath);
+        var templateText = TryReadTemplate(title.TemplatePath);
+        if (template == null || templateText == null)
+            return $"Template: unavailable{Environment.NewLine}Testing: read-only analysis only";
+
+        var placeholders = Regex.Matches(templateText, @"REPLACE[A-Z0-9_]+")
+            .Select(match => match.Value)
+            .Distinct()
+            .ToList();
+        return $"Event: {title.TemplateEventName}{Environment.NewLine}" +
+            $"Template: {title.TemplatePath}{Environment.NewLine}" +
+            $"SCID: {title.Scid}{Environment.NewLine}" +
+            $"Placeholders: {(placeholders.Count == 0 ? "<none>" : string.Join(", ", placeholders))}{Environment.NewLine}" +
+            $"ProgressionData / REPLACEINDEX testing: {(title.HasProgressionDataTemplate ? "available" : "unavailable; read-only analysis only")}";
+    }
+
+    private static JObject? TryLoadTemplate(string path)
+    {
+        try
+        {
+            var template = TryReadTemplate(path);
+            return template == null
+                ? null
+                : JObject.Parse(Regex.Replace(template, @"REPLACE[A-Z0-9_]+", "0"));
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static string? TryReadTemplate(string path)
+    {
+        try
+        {
+            return File.Exists(path) ? File.ReadAllText(path) : null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static string GetEventsPath() => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "XAU", "Events");
 
     private async Task LoadAchievements()
     {
@@ -423,18 +616,20 @@ public partial class QuantumBreakResearchViewModel : ObservableObject, INavigati
             var response = await FetchAchievements();
             if (response == null)
             {
-                AchievementStatus = "Quantum Break achievements could not be loaded. Ensure Xbox authentication is connected.";
+                AchievementStatus = "Achievements could not be loaded. Ensure Xbox authentication is connected.";
                 Achievements.Clear();
                 ClearRequirementAnalysis();
                 return;
             }
 
             ApplyAchievements(response, SelectedAchievement?.Id);
-            AchievementStatus = $"Loaded {Achievements.Count} Quantum Break achievement(s) from Xbox.";
+            AchievementStatus = $"Loaded {Achievements.Count} achievement(s) for {SelectedResearchTitle!.Name} from Xbox.";
+            SelectedResearchTitle.MissingCount = Math.Max(0, Achievements.Count - SelectedResearchTitle.MappedCount).ToString();
+            RefreshResearchTitleCards();
         }
         catch (Exception ex)
         {
-            AchievementStatus = $"Quantum Break achievement load failed: {ex.Message}";
+            AchievementStatus = $"Achievement load failed: {ex.Message}";
             Achievements.Clear();
             ClearRequirementAnalysis();
         }
@@ -446,25 +641,29 @@ public partial class QuantumBreakResearchViewModel : ObservableObject, INavigati
 
     private async Task<AchievementsResponse?> FetchAchievements()
     {
+        if (SelectedResearchTitle == null)
+            return null;
+
         var api = new XboxRestAPI(HomeViewModel.XAUTH);
-        return await api.GetAchievementsForTitleAsync(HomeViewModel.XUIDOnly, QuantumBreakTitleId);
+        return await api.GetAchievementsForTitleAsync(HomeViewModel.XUIDOnly, SelectedResearchTitle.TitleId);
     }
 
     private void ApplyAchievements(AchievementsResponse response, string? selectedId)
     {
-        var mappings = LoadQuantumBreakMappings();
-        Achievements = new ObservableCollection<QuantumBreakResearchAchievement>(
+        var mappings = LoadSelectedTitleMappings();
+        Achievements = new ObservableCollection<ResearchAchievement>(
             response.achievements.Select(achievement =>
             {
                 var requirements = achievement.progression?.requirements ?? [];
                 var mapping = mappings?[achievement.id] as JObject;
-                return new QuantumBreakResearchAchievement
+                return new ResearchAchievement
                 {
                     Id = achievement.id,
                     Name = achievement.name,
                     State = achievement.progressState,
                     MappingStatus = FormatMappingStatus(mapping),
-                    Classification = QuantumBreakResearchClassifier.ClassifyAchievement(achievement.id, _allHistoryEntries),
+                    Classification = AchievementResearchClassifier.ClassifyAchievement(
+                        SelectedResearchTitle!.TitleId, achievement.id, _allHistoryEntries),
                     Current = FormatRequirementValues(requirements, requirement => requirement.current),
                     Target = FormatRequirementValues(requirements, requirement => requirement.target)
                 };
@@ -481,8 +680,10 @@ public partial class QuantumBreakResearchViewModel : ObservableObject, INavigati
         var rows = response.achievements.SelectMany(achievement =>
         {
             var mappingStatus = FormatMappingStatus(mappings?[achievement.id] as JObject);
-            var classification = QuantumBreakResearchClassifier.ClassifyAchievement(achievement.id, _allHistoryEntries);
-            var isPriorityUnsupported = priorityUnsupportedIds.Contains(achievement.id)
+            var classification = AchievementResearchClassifier.ClassifyAchievement(
+                SelectedResearchTitle!.TitleId, achievement.id, _allHistoryEntries);
+            var isPriorityUnsupported = SelectedResearchTitle.TitleId == AchievementMappingResearchStore.QuantumBreakTitleId
+                && priorityUnsupportedIds.Contains(achievement.id)
                 && mappingStatus.StartsWith("Unsupported", StringComparison.Ordinal)
                 && !string.Equals(achievement.progressState, "Achieved", StringComparison.OrdinalIgnoreCase);
             var requirements = achievement.progression?.requirements ?? [];
@@ -493,11 +694,11 @@ public partial class QuantumBreakResearchViewModel : ObservableObject, INavigati
         }).OrderBy(row => int.TryParse(row.AchievementId, out var id) ? id : int.MaxValue)
             .ThenBy(row => row.RequirementId);
 
-        RequirementAnalysisRows = new ObservableCollection<QuantumBreakRequirementAnalysisRow>(rows);
+        RequirementAnalysisRows = new ObservableCollection<ResearchRequirementAnalysisRow>(rows);
         UpdateRequirementAnalysisSummary();
     }
 
-    private static QuantumBreakRequirementAnalysisRow CreateRequirementAnalysisRow(
+    private static ResearchRequirementAnalysisRow CreateRequirementAnalysisRow(
         OneCoreAchievementResponse achievement,
         AchievementRequirements? requirement,
         string mappingStatus,
@@ -549,7 +750,7 @@ public partial class QuantumBreakResearchViewModel : ObservableObject, INavigati
     private void ClearRequirementAnalysis()
     {
         RequirementAnalysisRows.Clear();
-        RequirementAnalysisSummary = "Load Quantum Break achievements to analyse requirement structures.";
+        RequirementAnalysisSummary = "Load a title's achievements to analyse requirement structures.";
     }
 
     private void UpdateRequirementAnalysisSummary()
@@ -569,11 +770,10 @@ public partial class QuantumBreakResearchViewModel : ObservableObject, INavigati
                 $"{group.First().MappingStatus}; {group.First().Classification}; " +
                 $"shapes={string.Join(", ", group.Select(row => row.Shape).Distinct())}")
             .ToList();
-        var knownCandidates = new HashSet<int> { 1, 2, 22, 25 };
         var knownHits = _allHistoryEntries
             .Where(entry => entry.ChangedAchievements.Count > 0
                 || entry.Result is "Progress changed" or "Achievement unlocked"
-                || knownCandidates.Contains(entry.ProgressionData))
+                || entry.CandidateClassification != AchievementResearchClassifier.Unknown)
             .Select(entry => entry.ProgressionData)
             .Distinct()
             .OrderBy(value => value)
@@ -605,24 +805,17 @@ public partial class QuantumBreakResearchViewModel : ObservableObject, INavigati
             $"Candidates that affected different achievements:{Environment.NewLine}{FormatAnalysisLines(differentAchievementHits)}";
     }
 
-    private static string FormatAnalysisGroups(IEnumerable<IGrouping<string, QuantumBreakRequirementAnalysisRow>> groups) =>
+    private static string FormatAnalysisGroups(IEnumerable<IGrouping<string, ResearchRequirementAnalysisRow>> groups) =>
         string.Join(", ", groups.OrderBy(group => group.Key).Select(group => $"{group.Key}={group.Count()}"));
 
     private static string FormatAnalysisLines(IReadOnlyCollection<string> lines) =>
         lines.Count == 0 ? "<none>" : string.Join(Environment.NewLine, lines);
 
-    private static JObject? LoadQuantumBreakMappings()
+    private JObject? LoadSelectedTitleMappings()
     {
-        try
-        {
-            var path = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "XAU", "Events", "Data.json");
-            return JObject.Parse(File.ReadAllText(path))[QuantumBreakTitleId]?["Achievements"] as JObject;
-        }
-        catch
-        {
-            return null;
-        }
+        return SelectedResearchTitle == null
+            ? null
+            : _eventData?[SelectedResearchTitle.TitleId]?["Achievements"] as JObject;
     }
 
     private static string FormatMappingStatus(JObject? mapping)
@@ -648,9 +841,21 @@ public partial class QuantumBreakResearchViewModel : ObservableObject, INavigati
     private bool TryGetCandidate(out int candidate)
     {
         candidate = 0;
+        if (SelectedResearchTitle == null)
+        {
+            TestStatus = "Select an event-based title first.";
+            return false;
+        }
+
+        if (!CanUseProgressionDataTemplate)
+        {
+            TestStatus = "This title is read-only because its event template does not support REPLACEINDEX.";
+            return false;
+        }
+
         if (SelectedAchievement == null)
         {
-            TestStatus = "Select a Quantum Break achievement first.";
+            TestStatus = "Select an achievement first.";
             return false;
         }
 
@@ -692,11 +897,12 @@ public partial class QuantumBreakResearchViewModel : ObservableObject, INavigati
                 : "Events token: available for one confirmed test event.";
     }
 
-    private static string BuildPayload(int candidate, bool forSend)
+    private string BuildPayload(int candidate, bool forSend)
     {
-        var templatePath = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "XAU", "Events", "333628240.json");
-        var requestBody = File.ReadAllText(templatePath)
+        if (SelectedResearchTitle == null || !CanUseProgressionDataTemplate)
+            throw new InvalidOperationException("The selected title does not have a usable REPLACEINDEX event template.");
+
+        var requestBody = File.ReadAllText(SelectedResearchTitle.TemplatePath)
             .Replace("REPLACEINDEX", candidate.ToString(CultureInfo.InvariantCulture))
             .Replace("REPLACESEQ", forSend ? DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString() : "0")
             .Replace("REPLACEXUID", forSend ? HomeViewModel.XUIDOnly : "REDACTED_XUID")
@@ -751,7 +957,7 @@ public partial class QuantumBreakResearchViewModel : ObservableObject, INavigati
             }
 
             var entry = CreateHistoryEntry(candidate, selectedId, selectedName, before, after, changes, anyChanged);
-            QuantumBreakMappingResearchStore.Record(entry);
+            AchievementMappingResearchStore.Record(entry);
             var changeSummary = AnalyzeSnapshotChanges(before, after, selectedId);
             return new RangeCandidateResult
             {
@@ -796,7 +1002,7 @@ public partial class QuantumBreakResearchViewModel : ObservableObject, INavigati
         }
     }
 
-    private static RangeCandidateResult PersistRangeFailure(
+    private RangeCandidateResult PersistRangeFailure(
         int candidate,
         string selectedId,
         string selectedName,
@@ -804,7 +1010,7 @@ public partial class QuantumBreakResearchViewModel : ObservableObject, INavigati
         string status)
     {
         var entry = CreateHistoryEntry(candidate, selectedId, selectedName, before, [], status, true);
-        QuantumBreakMappingResearchStore.Record(entry);
+        AchievementMappingResearchStore.Record(entry);
         return new RangeCandidateResult
         {
             Entry = entry,
@@ -819,7 +1025,7 @@ public partial class QuantumBreakResearchViewModel : ObservableObject, INavigati
         start = end = delaySeconds = maxAttempts = 0;
         if (SelectedAchievement == null)
         {
-            RangeStatus = "Select a Quantum Break achievement first.";
+            RangeStatus = "Select an achievement first.";
             return false;
         }
 
@@ -852,7 +1058,7 @@ public partial class QuantumBreakResearchViewModel : ObservableObject, INavigati
     private string? GetStopHit(RangeCandidateResult result, string selectedId)
     {
         var summary = result.ChangeSummary;
-        var watchedChanges = WatchAllQuantumBreakAchievements
+        var watchedChanges = WatchAllAchievements
             ? summary.Changes
             : summary.Changes.Where(change => change.IsSelectedAchievement).ToList();
         var shouldStop = StopOnSelectedAchievementChange && summary.SelectedAchievementChanged
@@ -868,7 +1074,7 @@ public partial class QuantumBreakResearchViewModel : ObservableObject, INavigati
             : string.Join(", ", watchedChanges.Select(change => $"{change.AchievementId} - {change.AchievementName}"));
     }
 
-    private static SnapshotChangeSummary AnalyzeSnapshotChanges(
+    private SnapshotChangeSummary AnalyzeSnapshotChanges(
         Dictionary<string, ResearchSnapshot> before,
         Dictionary<string, ResearchSnapshot> after,
         string selectedId)
@@ -893,7 +1099,7 @@ public partial class QuantumBreakResearchViewModel : ObservableObject, INavigati
             if (!stateChanged && !unlockTimeChanged && !requirementsChanged)
                 continue;
 
-            var change = new QuantumBreakChangedAchievement
+            var change = new ResearchChangedAchievement
             {
                 AchievementId = achievementId,
                 AchievementName = afterAchievement?.Name ?? beforeAchievement?.Name ?? "",
@@ -910,14 +1116,15 @@ public partial class QuantumBreakResearchViewModel : ObservableObject, INavigati
                 AfterRequirements = afterAchievement?.Requirements.ToDictionary(item => item.Key, item => item.Value) ?? [],
                 RequirementDiff = string.Join("; ", requirementDiff)
             };
-            change.Classification = QuantumBreakResearchClassifier.ClassifyAchievement(achievementId, change);
+            change.Classification = AchievementResearchClassifier.ClassifyAchievement(
+                SelectedResearchTitle!.TitleId, achievementId, change);
             result.Changes.Add(change);
         }
 
         return result;
     }
 
-    private static string FormatAttemptStatus(int candidate, QuantumBreakMappingResearchEntry entry) =>
+    private static string FormatAttemptStatus(int candidate, AchievementMappingResearchEntry entry) =>
         entry.Result switch
         {
             "Achievement unlocked" => $"Candidate {candidate}: achievement unlocked.",
@@ -970,7 +1177,7 @@ public partial class QuantumBreakResearchViewModel : ObservableObject, INavigati
                     .ToDictionary(requirement => requirement.Key!, requirement => requirement.current)
             });
 
-    private static string CompareSnapshots(
+    private string CompareSnapshots(
         Dictionary<string, ResearchSnapshot> before,
         Dictionary<string, ResearchSnapshot> after,
         string selectedId,
@@ -1007,7 +1214,7 @@ public partial class QuantumBreakResearchViewModel : ObservableObject, INavigati
         return lines;
     }
 
-    private static QuantumBreakMappingResearchEntry CreateHistoryEntry(
+    private AchievementMappingResearchEntry CreateHistoryEntry(
         int candidate,
         string selectedId,
         string selectedName,
@@ -1021,8 +1228,9 @@ public partial class QuantumBreakResearchViewModel : ObservableObject, INavigati
         var summary = AnalyzeSnapshotChanges(before, after, selectedId);
         var changedAchievements = summary.Changes;
 
-        return new QuantumBreakMappingResearchEntry
+        return new AchievementMappingResearchEntry
         {
+            TitleId = SelectedResearchTitle!.TitleId,
             ProgressionData = candidate,
             AchievementId = selectedId,
             AchievementName = beforeSelected?.Name ?? afterSelected?.Name ?? selectedName,
@@ -1047,19 +1255,42 @@ public partial class QuantumBreakResearchViewModel : ObservableObject, INavigati
     private void LoadHistory(bool selectNewest = false)
     {
         var selectedRecordedAt = selectNewest ? null : SelectedEntry?.RecordedAtUtc;
-        var allEntries = QuantumBreakMappingResearchStore.Load()
+        if (SelectedResearchTitle == null)
+        {
+            Entries.Clear();
+            SelectedEntry = null;
+            HistoryStatus = "Select a title to load its research history.";
+            CandidateHistorySummary = "No title selected.";
+            _allHistoryEntries = [];
+            return;
+        }
+
+        var allEntries = AchievementMappingResearchStore.Load(SelectedResearchTitle.TitleId)
             .OrderByDescending(entry => entry.RecordedAtUtc)
             .ToList();
         _allHistoryEntries = allEntries;
         RefreshAchievementClassifications();
         var filtered = allEntries.Where(entry => entry.Matches(SearchText)).ToList();
 
-        Entries = new ObservableCollection<QuantumBreakMappingResearchEntry>(filtered);
+        Entries = new ObservableCollection<AchievementMappingResearchEntry>(filtered);
         SelectedEntry = selectedRecordedAt.HasValue
             ? Entries.FirstOrDefault(entry => entry.RecordedAtUtc == selectedRecordedAt.Value)
             : Entries.FirstOrDefault();
         HistoryStatus = $"Showing {filtered.Count} of {allEntries.Count} persisted research record(s).";
         CandidateHistorySummary = BuildCandidateHistorySummary(allEntries);
+        SelectedResearchTitle.KnownHits = FormatCandidateValues(allEntries
+            .Where(entry => entry.CandidateClassification != AchievementResearchClassifier.Unknown)
+            .Select(entry => entry.ProgressionData)
+            .Distinct()
+            .OrderBy(value => value)
+            .ToList());
+        SelectedResearchTitle.KnownMisses = FormatCandidateValues(allEntries
+            .GroupBy(entry => entry.ProgressionData)
+            .Where(group => group.All(entry => entry.Result == "No effect"))
+            .Select(group => group.Key)
+            .OrderBy(value => value)
+            .ToList());
+        RefreshResearchTitleCards();
         UpdateRequirementAnalysisSummary();
     }
 
@@ -1067,31 +1298,35 @@ public partial class QuantumBreakResearchViewModel : ObservableObject, INavigati
     {
         var selectedId = SelectedAchievement?.Id;
         foreach (var achievement in Achievements)
-            achievement.Classification = QuantumBreakResearchClassifier.ClassifyAchievement(
-                achievement.Id, _allHistoryEntries);
+            achievement.Classification = AchievementResearchClassifier.ClassifyAchievement(
+                SelectedResearchTitle!.TitleId, achievement.Id, _allHistoryEntries);
         if (Achievements.Count > 0)
         {
-            Achievements = new ObservableCollection<QuantumBreakResearchAchievement>(Achievements);
+            Achievements = new ObservableCollection<ResearchAchievement>(Achievements);
             SelectedAchievement = Achievements.FirstOrDefault(achievement => achievement.Id == selectedId)
                 ?? Achievements.FirstOrDefault();
         }
 
         foreach (var row in RequirementAnalysisRows)
-            row.Classification = QuantumBreakResearchClassifier.ClassifyAchievement(
-                row.AchievementId, _allHistoryEntries);
+            row.Classification = AchievementResearchClassifier.ClassifyAchievement(
+                SelectedResearchTitle!.TitleId, row.AchievementId, _allHistoryEntries);
         if (RequirementAnalysisRows.Count > 0)
-            RequirementAnalysisRows = new ObservableCollection<QuantumBreakRequirementAnalysisRow>(
+            RequirementAnalysisRows = new ObservableCollection<ResearchRequirementAnalysisRow>(
                 RequirementAnalysisRows);
     }
 
-    private static string BuildCandidateHistorySummary(IReadOnlyCollection<QuantumBreakMappingResearchEntry> entries)
+    private static string BuildCandidateHistorySummary(IReadOnlyCollection<AchievementMappingResearchEntry> entries)
     {
         var tested = entries.Select(entry => entry.ProgressionData).Distinct().OrderBy(value => value).ToList();
         if (tested.Count == 0)
             return "Known hits: <none>\nKnown misses: <none>\nUntested ranges: <none>";
 
-        var knownCandidates = new HashSet<int> { 1, 2, 22, 25 };
-        var knownHits = tested.Where(knownCandidates.Contains).ToList();
+        var knownHits = entries
+            .Where(entry => entry.CandidateClassification != AchievementResearchClassifier.Unknown)
+            .Select(entry => entry.ProgressionData)
+            .Distinct()
+            .OrderBy(value => value)
+            .ToList();
         var detectedHits = entries
             .Where(entry => entry.ChangedAchievements.Count > 0
                 || entry.Result is "Progress changed" or "Achievement unlocked")
@@ -1114,7 +1349,7 @@ public partial class QuantumBreakResearchViewModel : ObservableObject, INavigati
             .Select(group =>
                 $"{group.Key}: {FormatCandidateValues(group.Select(entry => entry.ProgressionData).Distinct().OrderBy(value => value).ToList())}");
 
-        return $"Known hits (1, 2, 22, 25 present in history): {FormatCandidateValues(knownHits)}{Environment.NewLine}" +
+        return $"Known hits: {FormatCandidateValues(knownHits)}{Environment.NewLine}" +
             $"Detected hits: {FormatCandidateValues(detectedHits)}{Environment.NewLine}" +
             $"Known misses: {FormatCandidateValues(misses)}{Environment.NewLine}" +
             $"Untested ranges within {tested[0]}-{tested[^1]}: {FormatCandidateRanges(untested)}{Environment.NewLine}" +
@@ -1165,7 +1400,7 @@ public partial class QuantumBreakResearchViewModel : ObservableObject, INavigati
 
     private sealed class RangeCandidateResult
     {
-        public required QuantumBreakMappingResearchEntry Entry { get; init; }
+        public required AchievementMappingResearchEntry Entry { get; init; }
         public string Status { get; init; } = "";
         public bool RequestFailed { get; init; }
         public bool Cancelled { get; set; }
@@ -1175,7 +1410,7 @@ public partial class QuantumBreakResearchViewModel : ObservableObject, INavigati
 
     private sealed class SnapshotChangeSummary
     {
-        public List<QuantumBreakChangedAchievement> Changes { get; } = new();
+        public List<ResearchChangedAchievement> Changes { get; } = new();
         public bool AchievementUnlocked => Changes.Any(change => change.AchievementUnlocked);
         public bool StateChanged => Changes.Any(change => change.StateChanged);
         public bool RequirementChanged => Changes.Any(change => change.RequirementChanged);
@@ -1183,24 +1418,44 @@ public partial class QuantumBreakResearchViewModel : ObservableObject, INavigati
     }
 }
 
-public sealed class QuantumBreakResearchAchievement
+public sealed class ResearchAchievement
 {
     public string Id { get; set; } = "";
     public string Name { get; set; } = "";
     public string State { get; set; } = "";
     public string MappingStatus { get; set; } = "";
-    public string Classification { get; set; } = QuantumBreakResearchClassifier.Unknown;
+    public string Classification { get; set; } = AchievementResearchClassifier.Unknown;
     public string Current { get; set; } = "";
     public string Target { get; set; } = "";
 }
 
-public sealed class QuantumBreakRequirementAnalysisRow
+public sealed class ResearchTitleCard
+{
+    public string TitleId { get; set; } = "";
+    public string Name { get; set; } = "";
+    public string Image { get; set; } = "";
+    public string Scid { get; set; } = "<unknown>";
+    public int MappedCount { get; set; }
+    public string MissingCount { get; set; } = "<load title>";
+    public string KnownHits { get; set; } = "<none>";
+    public string KnownMisses { get; set; } = "<none>";
+    public string TemplatePath { get; set; } = "";
+    public string TemplateEventName { get; set; } = "<template unavailable>";
+    public bool HasProgressionDataTemplate { get; set; }
+    public string KnownHitsDisplay => $"Hits: {KnownHits}";
+    public string KnownMissesDisplay => $"Misses: {KnownMisses}";
+    public string TemplateSupport => HasProgressionDataTemplate
+        ? "ProgressionData testing available"
+        : "Read-only analysis";
+}
+
+public sealed class ResearchRequirementAnalysisRow
 {
     public string AchievementId { get; set; } = "";
     public string AchievementName { get; set; } = "";
     public string State { get; set; } = "";
     public string MappingStatus { get; set; } = "";
-    public string Classification { get; set; } = QuantumBreakResearchClassifier.Unknown;
+    public string Classification { get; set; } = AchievementResearchClassifier.Unknown;
     public string RequirementId { get; set; } = "";
     public string Current { get; set; } = "";
     public string Target { get; set; } = "";
@@ -1211,7 +1466,7 @@ public sealed class QuantumBreakRequirementAnalysisRow
     public bool IsPriorityUnsupported { get; set; }
 }
 
-public sealed class QuantumBreakRangeAttemptRow
+public sealed class ResearchRangeAttemptRow
 {
     public int ProgressionData { get; set; }
     public string Achievement { get; set; } = "";
@@ -1225,7 +1480,7 @@ public sealed class QuantumBreakRangeAttemptRow
     public string AfterState { get; set; } = "";
     public string Status { get; set; } = "";
 
-    public static QuantumBreakRangeAttemptRow From(QuantumBreakMappingResearchEntry entry, string status) =>
+    public static ResearchRangeAttemptRow From(AchievementMappingResearchEntry entry, string status) =>
         new()
         {
             ProgressionData = entry.ProgressionData,

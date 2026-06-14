@@ -758,8 +758,9 @@ namespace XAU.ViewModels.Pages
             var selectedStateChanged = before != null && after != null &&
                 (before.State != after.State || before.TimeUnlocked != after.TimeUnlocked);
 
-            QuantumBreakMappingResearchStore.Record(new QuantumBreakMappingResearchEntry
+            AchievementMappingResearchStore.Record(new AchievementMappingResearchEntry
             {
+                TitleId = AchievementMappingResearchStore.QuantumBreakTitleId,
                 ProgressionData = _lastQuantumBreakCandidate.Value,
                 AchievementId = selectedKey,
                 AchievementName = before?.Name ?? after?.Name ?? SelectedAchievement?.Name ?? "",

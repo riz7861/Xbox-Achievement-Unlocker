@@ -89,9 +89,9 @@ namespace XAU.ViewModels.Windows
             },
             new NavigationViewItem()
             {
-                Content = "QB Mapping Research",
+                Content = "Mapping Research Lab",
                 Icon = new SymbolIcon { Symbol = SymbolRegular.Search24 },
-                TargetPageType = typeof(Views.Pages.QuantumBreakResearchPage)
+                TargetPageType = typeof(Views.Pages.AchievementResearchLabPage)
             }
             #endif
 

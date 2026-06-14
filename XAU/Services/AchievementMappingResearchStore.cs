@@ -3,36 +3,65 @@ using Newtonsoft.Json;
 
 namespace XAU.Services;
 
-public static class QuantumBreakMappingResearchStore
+public static class AchievementMappingResearchStore
 {
+    public const string QuantumBreakTitleId = "333628240";
+
     private static readonly object Sync = new();
-    private static readonly string HistoryPath = Path.Combine(
+    private static readonly string HistoryDirectory = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "XAU",
+        "Debug",
+        "achievement_mapping_research");
+    private static readonly string LegacyQuantumBreakHistoryPath = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "XAU",
         "Debug",
         "quantum_break_mapping_history.json");
 
-    public static string FilePath => HistoryPath;
+    public static string FilePath(string titleId) =>
+        Path.Combine(HistoryDirectory, $"{SanitizeTitleId(titleId)}.json");
 
-    public static IReadOnlyList<QuantumBreakMappingResearchEntry> Load()
+    public static IReadOnlyList<AchievementMappingResearchEntry> Load(string titleId)
     {
         lock (Sync)
         {
             try
             {
-                if (!File.Exists(HistoryPath))
+                var path = FilePath(titleId);
+                var isLegacyQuantumBreakHistory = !File.Exists(path)
+                    && titleId == QuantumBreakTitleId
+                    && File.Exists(LegacyQuantumBreakHistoryPath);
+                if (isLegacyQuantumBreakHistory)
+                    path = LegacyQuantumBreakHistoryPath;
+                if (!File.Exists(path))
                     return [];
 
-                var entries = JsonConvert.DeserializeObject<List<QuantumBreakMappingResearchEntry>>(
-                    File.ReadAllText(HistoryPath)) ?? [];
+                var entries = JsonConvert.DeserializeObject<List<AchievementMappingResearchEntry>>(
+                    File.ReadAllText(path)) ?? [];
                 foreach (var entry in entries)
                 {
+                    entry.TitleId = string.IsNullOrWhiteSpace(entry.TitleId) ? titleId : entry.TitleId;
                     entry.BeforeRequirements ??= [];
                     entry.AfterRequirements ??= [];
                     entry.ChangedAchievements ??= [];
-                    QuantumBreakResearchClassifier.Apply(entry);
+                    AchievementResearchClassifier.Apply(entry);
                 }
-                return entries;
+                var titleEntries = entries.Where(entry => entry.TitleId == titleId).ToList();
+                if (isLegacyQuantumBreakHistory)
+                {
+                    try
+                    {
+                        var titlePath = FilePath(titleId);
+                        Directory.CreateDirectory(Path.GetDirectoryName(titlePath)!);
+                        File.WriteAllText(titlePath, JsonConvert.SerializeObject(titleEntries, Formatting.Indented));
+                    }
+                    catch
+                    {
+                        // A failed migration must not hide otherwise readable legacy history.
+                    }
+                }
+                return titleEntries;
             }
             catch
             {
@@ -41,42 +70,48 @@ public static class QuantumBreakMappingResearchStore
         }
     }
 
-    public static void Record(QuantumBreakMappingResearchEntry entry)
+    public static void Record(AchievementMappingResearchEntry entry)
     {
         lock (Sync)
         {
             try
             {
-                QuantumBreakResearchClassifier.Apply(entry);
-                var entries = Load().ToList();
+                entry.TitleId = string.IsNullOrWhiteSpace(entry.TitleId) ? QuantumBreakTitleId : entry.TitleId;
+                AchievementResearchClassifier.Apply(entry);
+                var entries = Load(entry.TitleId).ToList();
                 entries.Add(entry);
-                Directory.CreateDirectory(Path.GetDirectoryName(HistoryPath)!);
-                File.WriteAllText(HistoryPath, JsonConvert.SerializeObject(entries, Formatting.Indented));
+                var path = FilePath(entry.TitleId);
+                Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+                File.WriteAllText(path, JsonConvert.SerializeObject(entries, Formatting.Indented));
             }
             catch
             {
-                // Research logging must never affect the explicit single-event test flow.
+                // Research logging must never affect an explicit test event.
             }
         }
     }
+
+    private static string SanitizeTitleId(string titleId) =>
+        new(titleId.Where(char.IsLetterOrDigit).ToArray());
 }
 
-public sealed class QuantumBreakMappingResearchEntry
+public sealed class AchievementMappingResearchEntry
 {
+    public string TitleId { get; set; } = "";
     public DateTime RecordedAtUtc { get; set; } = DateTime.UtcNow;
     public int ProgressionData { get; set; }
     public string AchievementId { get; set; } = "";
     public string AchievementName { get; set; } = "";
     public string Result { get; set; } = "Unknown state change";
-    public string CandidateClassification { get; set; } = QuantumBreakResearchClassifier.Unknown;
-    public string AchievementClassification { get; set; } = QuantumBreakResearchClassifier.Unknown;
+    public string CandidateClassification { get; set; } = AchievementResearchClassifier.Unknown;
+    public string AchievementClassification { get; set; } = AchievementResearchClassifier.Unknown;
     public string? BeforeState { get; set; }
     public string? AfterState { get; set; }
     public string? BeforeUnlockTime { get; set; }
     public string? AfterUnlockTime { get; set; }
     public Dictionary<string, string?> BeforeRequirements { get; set; } = new();
     public Dictionary<string, string?> AfterRequirements { get; set; } = new();
-    public List<QuantumBreakChangedAchievement> ChangedAchievements { get; set; } = new();
+    public List<ResearchChangedAchievement> ChangedAchievements { get; set; } = new();
     public string ObservedChanges { get; set; } = "";
 
     [JsonIgnore]
@@ -103,6 +138,7 @@ public sealed class QuantumBreakMappingResearchEntry
 
     [JsonIgnore]
     public string Details =>
+        $"Title ID: {TitleId}{Environment.NewLine}" +
         $"Recorded UTC: {RecordedAtUtc:O}{Environment.NewLine}" +
         $"ProgressionData: {ProgressionData}{Environment.NewLine}" +
         $"Achievement: {AchievementId} - {AchievementName}{Environment.NewLine}" +
@@ -124,6 +160,7 @@ public sealed class QuantumBreakMappingResearchEntry
 
         return new[]
         {
+            TitleId,
             ProgressionData.ToString(),
             AchievementId,
             AchievementName,
@@ -148,7 +185,7 @@ public sealed class QuantumBreakMappingResearchEntry
             : string.Join(", ", requirements.Select(requirement => $"{requirement.Key}={requirement.Value ?? "<none>"}"));
 }
 
-public sealed class QuantumBreakChangedAchievement
+public sealed class ResearchChangedAchievement
 {
     public string AchievementId { get; set; } = "";
     public string AchievementName { get; set; } = "";
@@ -157,7 +194,7 @@ public sealed class QuantumBreakChangedAchievement
     public bool StateChanged { get; set; }
     public bool UnlockTimeChanged { get; set; }
     public bool RequirementChanged { get; set; }
-    public string Classification { get; set; } = QuantumBreakResearchClassifier.Unknown;
+    public string Classification { get; set; } = AchievementResearchClassifier.Unknown;
     public string? BeforeState { get; set; }
     public string? AfterState { get; set; }
     public string? BeforeUnlockTime { get; set; }
@@ -188,7 +225,7 @@ public sealed class QuantumBreakChangedAchievement
             : string.Join(", ", requirements.Select(requirement => $"{requirement.Key}={requirement.Value ?? "<none>"}"));
 }
 
-public static class QuantumBreakResearchClassifier
+public static class AchievementResearchClassifier
 {
     public const string DirectUnlockMapping = "Direct Unlock Mapping";
     public const string DirectProgressionMapping = "Direct Progression Mapping";
@@ -196,7 +233,7 @@ public static class QuantumBreakResearchClassifier
     public const string FractionalAchievement = "Fractional/Percentage Achievement";
     public const string Unknown = "Unknown";
 
-    private static readonly IReadOnlyDictionary<string, string> KnownAchievements =
+    private static readonly IReadOnlyDictionary<string, string> QuantumBreakKnownAchievements =
         new Dictionary<string, string>
         {
             ["10"] = DirectUnlockMapping,
@@ -210,22 +247,24 @@ public static class QuantumBreakResearchClassifier
             ["52"] = DirectUnlockMapping
         };
 
-    private static readonly HashSet<int> KnownDirectUnlockCandidates = [1, 2, 22, 25];
+    private static readonly HashSet<int> QuantumBreakDirectUnlockCandidates = [1, 2, 22, 25];
 
-    public static void Apply(QuantumBreakMappingResearchEntry entry)
+    public static void Apply(AchievementMappingResearchEntry entry)
     {
         foreach (var change in entry.ChangedAchievements)
-            change.Classification = ClassifyAchievement(change.AchievementId, change);
+            change.Classification = ClassifyAchievement(entry.TitleId, change.AchievementId, change);
 
         entry.CandidateClassification = ClassifyCandidate(entry);
         entry.AchievementClassification = ClassifyAchievement(
+            entry.TitleId,
             entry.AchievementId,
             entry.ChangedAchievements.FirstOrDefault(change => change.AchievementId == entry.AchievementId));
     }
 
-    public static string ClassifyCandidate(QuantumBreakMappingResearchEntry entry)
+    public static string ClassifyCandidate(AchievementMappingResearchEntry entry)
     {
-        if (KnownDirectUnlockCandidates.Contains(entry.ProgressionData)
+        if (entry.TitleId == AchievementMappingResearchStore.QuantumBreakTitleId
+            && QuantumBreakDirectUnlockCandidates.Contains(entry.ProgressionData)
             || entry.ChangedAchievements.Any(change => change.AchievementUnlocked))
             return DirectUnlockMapping;
 
@@ -235,10 +274,11 @@ public static class QuantumBreakResearchClassifier
     }
 
     public static string ClassifyAchievement(
+        string titleId,
         string achievementId,
-        IEnumerable<QuantumBreakMappingResearchEntry>? history = null)
+        IEnumerable<AchievementMappingResearchEntry>? history = null)
     {
-        if (KnownAchievements.TryGetValue(achievementId, out var known))
+        if (TryGetKnownAchievement(titleId, achievementId, out var known))
             return known;
 
         var changes = history?.SelectMany(entry => entry.ChangedAchievements)
@@ -251,14 +291,24 @@ public static class QuantumBreakResearchClassifier
         return Unknown;
     }
 
-    public static string ClassifyAchievement(string achievementId, QuantumBreakChangedAchievement? change)
+    public static string ClassifyAchievement(string titleId, string achievementId, ResearchChangedAchievement? change)
     {
-        if (KnownAchievements.TryGetValue(achievementId, out var known))
+        if (TryGetKnownAchievement(titleId, achievementId, out var known))
             return known;
         if (change?.AchievementUnlocked == true)
             return DirectUnlockMapping;
         if (change?.RequirementChanged == true)
             return DirectProgressionMapping;
         return Unknown;
+    }
+
+    private static bool TryGetKnownAchievement(string titleId, string achievementId, out string classification)
+    {
+        if (titleId == AchievementMappingResearchStore.QuantumBreakTitleId
+            && QuantumBreakKnownAchievements.TryGetValue(achievementId, out classification!))
+            return true;
+
+        classification = Unknown;
+        return false;
     }
 }
