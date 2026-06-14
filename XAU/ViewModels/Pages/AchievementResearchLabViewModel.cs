@@ -482,21 +482,45 @@ public partial class AchievementResearchLabViewModel : ObservableObject, INaviga
                 .GroupBy(title => title.TitleId!)
                 .ToDictionary(group => group.Key, group => group.First());
 
-            var titles = _eventData.Properties().Select(property =>
+            var eventTitles = _eventData.Properties()
+                .Where(property => property.Name.All(char.IsDigit))
+                .ToDictionary(property => property.Name, property => property.Value as JObject);
+            var templateTitleIds = Directory.EnumerateFiles(eventsPath, "*.json")
+                .Select(Path.GetFileNameWithoutExtension)
+                .Where(titleId => titleId?.All(char.IsDigit) == true)
+                .Select(titleId => titleId!)
+                .ToList();
+            var titleIds = gamesByTitleId.Keys
+                .Concat(eventTitles.Keys)
+                .Concat(templateTitleIds)
+                .Distinct()
+                .ToList();
+
+            var titles = titleIds.Select(titleId =>
             {
-                gamesByTitleId.TryGetValue(property.Name, out var game);
-                var eventTitle = property.Value as JObject;
+                gamesByTitleId.TryGetValue(titleId, out var game);
+                eventTitles.TryGetValue(titleId, out var eventTitle);
                 var mappings = eventTitle?["Achievements"] as JObject;
-                var templatePath = Path.Combine(eventsPath, $"{property.Name}.json");
+                var templatePath = Path.Combine(eventsPath, $"{titleId}.json");
+                var hasEventTemplate = File.Exists(templatePath);
                 var template = TryLoadTemplate(templatePath);
                 var templateText = TryReadTemplate(templatePath);
-                var history = AchievementMappingResearchStore.Load(property.Name);
+                var history = AchievementMappingResearchStore.Load(titleId);
                 var mappedCount = mappings?.Properties().Count() ?? 0;
                 var fullySupported = eventTitle?["FullySupported"]?.Value<bool>() == true;
+                var placeholders = GetTemplatePlaceholders(templateText);
+                var replacementTypes = GetReplacementTypes(mappings);
+                var usesReplaceIndex = placeholders.Contains("REPLACEINDEX");
+                var hasUsableTemplate = template != null && usesReplaceIndex;
+                var compatibility = hasUsableTemplate
+                    ? ResearchCompatibility.ResearchSupported
+                    : game != null || mappedCount > 0 || template != null
+                        ? ResearchCompatibility.ReadOnlyAnalysis
+                        : ResearchCompatibility.Unsupported;
                 return new ResearchTitleCard
                 {
-                    TitleId = property.Name,
-                    Name = game?.Name ?? $"Title {property.Name}",
+                    TitleId = titleId,
+                    Name = game?.Name ?? $"Title {titleId}",
                     Image = string.IsNullOrWhiteSpace(game?.DisplayImage)
                         ? "pack://application:,,,/Assets/cirno.png"
                         : game.DisplayImage!,
@@ -519,16 +543,28 @@ public partial class AchievementResearchLabViewModel : ObservableObject, INaviga
                         .ToList()),
                     TemplatePath = templatePath,
                     TemplateEventName = template?["name"]?.ToString() ?? "<template unavailable>",
-                    HasProgressionDataTemplate = templateText?.Contains(
-                        "REPLACEINDEX", StringComparison.Ordinal) == true
+                    HasEventTemplate = hasEventTemplate,
+                    HasDataMappings = mappedCount > 0,
+                    HasProgressionDataTemplate = hasUsableTemplate,
+                    UsesReplaceIndex = usesReplaceIndex,
+                    ReplacementTypes = FormatDiscoveryValues(replacementTypes),
+                    OtherPlaceholders = FormatDiscoveryValues(placeholders
+                        .Where(placeholder => placeholder != "REPLACEINDEX")
+                        .ToList()),
+                    Compatibility = compatibility
                 };
             }).OrderByDescending(title => title.TitleId == AchievementMappingResearchStore.QuantumBreakTitleId)
+                .ThenBy(title => title.CompatibilitySortOrder)
                 .ThenBy(title => title.Name)
                 .ToList();
 
             ResearchTitles = new ObservableCollection<ResearchTitleCard>(titles);
             FilterResearchTitles();
-            TitleListStatus = $"Loaded {titles.Count} event-based research title(s).";
+            TitleListStatus =
+                $"Discovery found {titles.Count} title(s): " +
+                $"{titles.Count(title => title.Compatibility == ResearchCompatibility.ResearchSupported)} research supported, " +
+                $"{titles.Count(title => title.Compatibility == ResearchCompatibility.ReadOnlyAnalysis)} read-only analysis, " +
+                $"{titles.Count(title => title.Compatibility == ResearchCompatibility.Unsupported)} unsupported.";
 
             var quantumBreak = titles.FirstOrDefault(title =>
                 title.TitleId == AchievementMappingResearchStore.QuantumBreakTitleId);
@@ -549,7 +585,10 @@ public partial class AchievementResearchLabViewModel : ObservableObject, INaviga
             string.IsNullOrWhiteSpace(TitleSearchText)
             || title.Name.Contains(TitleSearchText, StringComparison.OrdinalIgnoreCase)
             || title.TitleId.Contains(TitleSearchText, StringComparison.OrdinalIgnoreCase)
-            || title.Scid.Contains(TitleSearchText, StringComparison.OrdinalIgnoreCase));
+            || title.Scid.Contains(TitleSearchText, StringComparison.OrdinalIgnoreCase)
+            || title.Compatibility.Contains(TitleSearchText, StringComparison.OrdinalIgnoreCase)
+            || title.ReplacementTypes.Contains(TitleSearchText, StringComparison.OrdinalIgnoreCase)
+            || title.OtherPlaceholders.Contains(TitleSearchText, StringComparison.OrdinalIgnoreCase));
         FilteredResearchTitles = new ObservableCollection<ResearchTitleCard>(filtered);
     }
 
@@ -564,18 +603,48 @@ public partial class AchievementResearchLabViewModel : ObservableObject, INaviga
         var template = TryLoadTemplate(title.TemplatePath);
         var templateText = TryReadTemplate(title.TemplatePath);
         if (template == null || templateText == null)
-            return $"Template: unavailable{Environment.NewLine}Testing: read-only analysis only";
+            return $"Compatibility: {title.Compatibility}{Environment.NewLine}" +
+                $"Event template exists: {title.HasEventTemplate}{Environment.NewLine}" +
+                $"Data.json mappings: {title.HasDataMappings} ({title.MappedCount}){Environment.NewLine}" +
+                $"Template: {(title.HasEventTemplate ? "present but unreadable" : "unavailable")}{Environment.NewLine}" +
+                $"Replacement types: {title.ReplacementTypes}{Environment.NewLine}" +
+                $"Testing: read-only analysis only";
 
-        var placeholders = Regex.Matches(templateText, @"REPLACE[A-Z0-9_]+")
-            .Select(match => match.Value)
-            .Distinct()
-            .ToList();
+        var placeholders = GetTemplatePlaceholders(templateText);
         return $"Event: {title.TemplateEventName}{Environment.NewLine}" +
             $"Template: {title.TemplatePath}{Environment.NewLine}" +
             $"SCID: {title.Scid}{Environment.NewLine}" +
+            $"Compatibility: {title.Compatibility}{Environment.NewLine}" +
+            $"Event template exists: {title.HasEventTemplate}{Environment.NewLine}" +
+            $"Data.json mappings: {title.HasDataMappings} ({title.MappedCount}){Environment.NewLine}" +
             $"Placeholders: {(placeholders.Count == 0 ? "<none>" : string.Join(", ", placeholders))}{Environment.NewLine}" +
+            $"Replacement types: {title.ReplacementTypes}{Environment.NewLine}" +
             $"ProgressionData / REPLACEINDEX testing: {(title.HasProgressionDataTemplate ? "available" : "unavailable; read-only analysis only")}";
     }
+
+    private static List<string> GetTemplatePlaceholders(string? templateText) =>
+        templateText == null
+            ? []
+            : Regex.Matches(templateText, @"REPLACE[A-Z0-9_]+")
+                .Select(match => match.Value)
+                .Distinct()
+                .OrderBy(value => value)
+                .ToList();
+
+    private static List<string> GetReplacementTypes(JObject? mappings) =>
+        mappings == null
+            ? []
+            : mappings.Descendants()
+                .OfType<JProperty>()
+                .Where(property => property.Name == "ReplacementType")
+                .Select(property => property.Value.ToString())
+                .Where(value => !string.IsNullOrWhiteSpace(value))
+                .Distinct()
+                .OrderBy(value => value)
+                .ToList();
+
+    private static string FormatDiscoveryValues(IReadOnlyCollection<string> values) =>
+        values.Count == 0 ? "<none>" : string.Join(", ", values);
 
     private static JObject? TryLoadTemplate(string path)
     {
@@ -1441,12 +1510,31 @@ public sealed class ResearchTitleCard
     public string KnownMisses { get; set; } = "<none>";
     public string TemplatePath { get; set; } = "";
     public string TemplateEventName { get; set; } = "<template unavailable>";
+    public bool HasEventTemplate { get; set; }
+    public bool HasDataMappings { get; set; }
     public bool HasProgressionDataTemplate { get; set; }
+    public bool UsesReplaceIndex { get; set; }
+    public string ReplacementTypes { get; set; } = "<none>";
+    public string OtherPlaceholders { get; set; } = "<none>";
+    public string Compatibility { get; set; } = ResearchCompatibility.Unsupported;
+    public int CompatibilitySortOrder => Compatibility switch
+    {
+        ResearchCompatibility.ResearchSupported => 0,
+        ResearchCompatibility.ReadOnlyAnalysis => 1,
+        _ => 2
+    };
     public string KnownHitsDisplay => $"Hits: {KnownHits}";
     public string KnownMissesDisplay => $"Misses: {KnownMisses}";
-    public string TemplateSupport => HasProgressionDataTemplate
-        ? "ProgressionData testing available"
-        : "Read-only analysis";
+    public string DiscoverySummary =>
+        $"Template: {(HasEventTemplate ? "yes" : "no")} | Mappings: {(HasDataMappings ? "yes" : "no")} | REPLACEINDEX: {(UsesReplaceIndex ? "yes" : "no")}";
+    public string ReplacementSummary => $"Types: {ReplacementTypes}";
+}
+
+public static class ResearchCompatibility
+{
+    public const string ResearchSupported = "Research Supported";
+    public const string ReadOnlyAnalysis = "Read-Only Analysis";
+    public const string Unsupported = "Unsupported";
 }
 
 public sealed class ResearchRequirementAnalysisRow

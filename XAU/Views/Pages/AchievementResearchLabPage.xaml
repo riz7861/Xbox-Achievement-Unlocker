@@ -22,9 +22,9 @@
             <ui:TextBox
                 Margin="0,0,0,8"
                 ClearButtonEnabled="True"
-                PlaceholderText="Search event-based titles by name, title ID, or SCID"
+                PlaceholderText="Search titles by name, ID, SCID, compatibility, or replacement type"
                 Text="{Binding ViewModel.TitleSearchText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"/>
-            <ScrollViewer Height="325" Margin="0,0,0,10" HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto">
+            <ScrollViewer Height="390" Margin="0,0,0,10" HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto">
                 <ItemsControl ItemsSource="{Binding ViewModel.FilteredResearchTitles, Mode=OneWay}">
                     <ItemsControl.ItemsPanel>
                         <ItemsPanelTemplate>
@@ -35,7 +35,7 @@
                         <DataTemplate>
                             <Button
                                 Width="285"
-                                Height="150"
+                                Height="190"
                                 Margin="0,0,8,8"
                                 Padding="0"
                                 HorizontalContentAlignment="Stretch"
@@ -51,6 +51,27 @@
                                         <ui:Image Width="66" Height="66" VerticalAlignment="Top" Source="{Binding Image, IsAsync=True}" CornerRadius="4"/>
                                         <StackPanel Grid.Column="1">
                                             <TextBlock FontWeight="SemiBold" Text="{Binding Name, Mode=OneWay}" TextWrapping="Wrap"/>
+                                            <Border
+                                                Margin="0,3,0,3"
+                                                Padding="5,2"
+                                                HorizontalAlignment="Left"
+                                                CornerRadius="4"
+                                                ToolTip="{Binding OtherPlaceholders, Mode=OneWay}">
+                                                <Border.Style>
+                                                    <Style TargetType="Border">
+                                                        <Setter Property="Background" Value="#493F8EDB"/>
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding Compatibility, Mode=OneWay}" Value="Research Supported">
+                                                                <Setter Property="Background" Value="#49388E3C"/>
+                                                            </DataTrigger>
+                                                            <DataTrigger Binding="{Binding Compatibility, Mode=OneWay}" Value="Unsupported">
+                                                                <Setter Property="Background" Value="#497F8C8D"/>
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </Border.Style>
+                                                <TextBlock FontSize="11" FontWeight="SemiBold" Text="{Binding Compatibility, Mode=OneWay}"/>
+                                            </Border>
                                             <TextBlock FontSize="11" Text="{Binding TitleId, Mode=OneWay}"/>
                                             <TextBlock FontSize="11" Text="{Binding Scid, Mode=OneWay}" TextTrimming="CharacterEllipsis"/>
                                             <TextBlock Margin="0,3,0,0" FontSize="11">
@@ -59,7 +80,8 @@
                                             </TextBlock>
                                             <TextBlock FontSize="11" Text="{Binding KnownHitsDisplay, Mode=OneWay}" TextTrimming="CharacterEllipsis"/>
                                             <TextBlock FontSize="11" Text="{Binding KnownMissesDisplay, Mode=OneWay}" TextTrimming="CharacterEllipsis"/>
-                                            <TextBlock FontSize="11" FontWeight="SemiBold" Text="{Binding TemplateSupport, Mode=OneWay}"/>
+                                            <TextBlock FontSize="11" Text="{Binding DiscoverySummary, Mode=OneWay}" TextTrimming="CharacterEllipsis"/>
+                                            <TextBlock FontSize="11" Text="{Binding ReplacementSummary, Mode=OneWay}" TextTrimming="CharacterEllipsis"/>
                                         </StackPanel>
                                     </Grid>
                                 </Border>
