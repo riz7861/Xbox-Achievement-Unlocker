@@ -21,6 +21,8 @@ public partial class AchievementResearchLabViewModel : ObservableObject, INaviga
     [ObservableProperty] private string _titleListStatus = "Loading event-based research titles...";
     [ObservableProperty] private ObservableCollection<ResearchTitleCard> _researchTitles = new();
     [ObservableProperty] private ObservableCollection<ResearchTitleCard> _filteredResearchTitles = new();
+    [ObservableProperty] private ObservableCollection<ResearchDiscoveryDiagnostic> _discoveryDiagnostics = new();
+    [ObservableProperty] private string _discoveryDiagnosticsSummary = "Discovery has not run.";
     [ObservableProperty] private ResearchTitleCard? _selectedResearchTitle;
     [ObservableProperty] private string _eventTemplateInfo = "Select a title to inspect its event template.";
     [ObservableProperty] private bool _canUseProgressionDataTemplate;
@@ -462,20 +464,37 @@ public partial class AchievementResearchLabViewModel : ObservableObject, INaviga
 
     private async Task LoadResearchTitles()
     {
+        DiscoveryDiagnostics.Clear();
+        var scanned = 0;
+        var skipped = 0;
+        var eventsPath = GetEventsPath();
+        var dataPath = Path.Combine(eventsPath, "Data.json");
+        _eventData = new JObject();
         try
         {
-            var eventsPath = GetEventsPath();
-            var dataPath = Path.Combine(eventsPath, "Data.json");
-            _eventData = JObject.Parse(File.ReadAllText(dataPath));
+            var dataRoot = JToken.Parse(File.ReadAllText(dataPath));
+            if (TryGetObject(dataRoot, out var dataObject))
+                _eventData = dataObject;
+            else
+                AddDiscoveryDiagnostic(dataPath, null, $"Expected an object root but found {dataRoot.Type}.");
+        }
+        catch (Exception ex)
+        {
+            AddDiscoveryDiagnostic(dataPath, null, ex.Message);
+        }
+
+        try
+        {
             var api = new XboxRestAPI(HomeViewModel.XAUTH);
             TitlesList games;
             try
             {
                 games = await api.GetGamesListAsync(HomeViewModel.XUIDOnly) ?? new TitlesList();
             }
-            catch
+            catch (Exception ex)
             {
                 games = new TitlesList();
+                AddDiscoveryDiagnostic("Xbox titles API", null, ex.Message);
             }
             var gamesByTitleId = games.Titles
                 .Where(title => !string.IsNullOrWhiteSpace(title.TitleId))
@@ -484,76 +503,153 @@ public partial class AchievementResearchLabViewModel : ObservableObject, INaviga
 
             var eventTitles = _eventData.Properties()
                 .Where(property => property.Name.All(char.IsDigit))
-                .ToDictionary(property => property.Name, property => property.Value as JObject);
-            var templateTitleIds = Directory.EnumerateFiles(eventsPath, "*.json")
-                .Select(Path.GetFileNameWithoutExtension)
-                .Where(titleId => titleId?.All(char.IsDigit) == true)
-                .Select(titleId => titleId!)
-                .ToList();
+                .ToDictionary(property => property.Name, property => property.Value);
+            var templateTitleIds = new List<string>();
+            try
+            {
+                templateTitleIds = Directory.EnumerateFiles(eventsPath, "*.json")
+                    .Select(Path.GetFileNameWithoutExtension)
+                    .Where(titleId => titleId?.All(char.IsDigit) == true)
+                    .Select(titleId => titleId!)
+                    .ToList();
+            }
+            catch (Exception ex)
+            {
+                AddDiscoveryDiagnostic(eventsPath, null, ex.Message);
+            }
+
+            var supportedTitleIds = new List<string>();
+            if (TryGetArray(_eventData, "SupportedTitleIDs", out var supportedTitles))
+            {
+                foreach (var supportedTitle in supportedTitles)
+                {
+                    if (TryGetInt(supportedTitle, out var titleId))
+                        supportedTitleIds.Add(titleId.ToString(CultureInfo.InvariantCulture));
+                    else
+                        AddDiscoveryDiagnostic(
+                            $"{dataPath}:SupportedTitleIDs",
+                            null,
+                            $"Ignored non-integer title ID with token type {supportedTitle.Type}.");
+                }
+            }
+            else if (_eventData.TryGetValue("SupportedTitleIDs", out var supportedTitlesToken))
+            {
+                AddDiscoveryDiagnostic(
+                    $"{dataPath}:SupportedTitleIDs",
+                    null,
+                    $"Expected an array but found {supportedTitlesToken.Type}.");
+            }
+
             var titleIds = gamesByTitleId.Keys
                 .Concat(eventTitles.Keys)
                 .Concat(templateTitleIds)
+                .Concat(supportedTitleIds)
                 .Distinct()
                 .ToList();
 
-            var titles = titleIds.Select(titleId =>
+            scanned = titleIds.Count;
+            var titles = new List<ResearchTitleCard>();
+            foreach (var titleId in titleIds)
             {
-                gamesByTitleId.TryGetValue(titleId, out var game);
-                eventTitles.TryGetValue(titleId, out var eventTitle);
-                var mappings = eventTitle?["Achievements"] as JObject;
-                var templatePath = Path.Combine(eventsPath, $"{titleId}.json");
-                var hasEventTemplate = File.Exists(templatePath);
-                var template = TryLoadTemplate(templatePath);
-                var templateText = TryReadTemplate(templatePath);
-                var history = AchievementMappingResearchStore.Load(titleId);
-                var mappedCount = mappings?.Properties().Count() ?? 0;
-                var fullySupported = eventTitle?["FullySupported"]?.Value<bool>() == true;
-                var placeholders = GetTemplatePlaceholders(templateText);
-                var replacementTypes = GetReplacementTypes(mappings);
-                var usesReplaceIndex = placeholders.Contains("REPLACEINDEX");
-                var hasUsableTemplate = template != null && usesReplaceIndex;
-                var compatibility = hasUsableTemplate
-                    ? ResearchCompatibility.ResearchSupported
-                    : game != null || mappedCount > 0 || template != null
-                        ? ResearchCompatibility.ReadOnlyAnalysis
-                        : ResearchCompatibility.Unsupported;
-                return new ResearchTitleCard
+                try
                 {
-                    TitleId = titleId,
-                    Name = game?.Name ?? $"Title {titleId}",
-                    Image = string.IsNullOrWhiteSpace(game?.DisplayImage)
-                        ? "pack://application:,,,/Assets/cirno.png"
-                        : game.DisplayImage!,
-                    Scid = template?["data"]?["baseData"]?["serviceConfigId"]?.ToString()
-                        ?? game?.ServiceConfigId
-                        ?? "<unknown>",
-                    MappedCount = mappedCount,
-                    MissingCount = fullySupported ? "0" : "<load title>",
-                    KnownHits = FormatCandidateValues(history
-                        .Where(entry => entry.CandidateClassification != AchievementResearchClassifier.Unknown)
-                        .Select(entry => entry.ProgressionData)
-                        .Distinct()
-                        .OrderBy(value => value)
-                        .ToList()),
-                    KnownMisses = FormatCandidateValues(history
-                        .GroupBy(entry => entry.ProgressionData)
-                        .Where(group => group.All(entry => entry.Result == "No effect"))
-                        .Select(group => group.Key)
-                        .OrderBy(value => value)
-                        .ToList()),
-                    TemplatePath = templatePath,
-                    TemplateEventName = template?["name"]?.ToString() ?? "<template unavailable>",
-                    HasEventTemplate = hasEventTemplate,
-                    HasDataMappings = mappedCount > 0,
-                    HasProgressionDataTemplate = hasUsableTemplate,
-                    UsesReplaceIndex = usesReplaceIndex,
-                    ReplacementTypes = FormatDiscoveryValues(replacementTypes),
-                    OtherPlaceholders = FormatDiscoveryValues(placeholders
-                        .Where(placeholder => placeholder != "REPLACEINDEX")
-                        .ToList()),
-                    Compatibility = compatibility
-                };
-            }).OrderByDescending(title => title.TitleId == AchievementMappingResearchStore.QuantumBreakTitleId)
+                    gamesByTitleId.TryGetValue(titleId, out var game);
+                    eventTitles.TryGetValue(titleId, out var eventTitleToken);
+                    JObject? eventTitle = null;
+                    JObject? mappings = null;
+                    if (eventTitleToken != null && !TryGetObject(eventTitleToken, out eventTitle))
+                    {
+                        AddDiscoveryDiagnostic(dataPath, titleId, $"Expected title data object but found {eventTitleToken.Type}.");
+                    }
+                    else if (eventTitle != null
+                        && eventTitle.TryGetValue("Achievements", out var mappingsToken)
+                        && !TryGetObject(eventTitle, "Achievements", out mappings))
+                    {
+                        AddDiscoveryDiagnostic(dataPath, titleId, $"Expected Achievements object but found {mappingsToken.Type}.");
+                    }
+
+                    var templatePath = Path.Combine(eventsPath, $"{titleId}.json");
+                    var hasEventTemplate = File.Exists(templatePath);
+                    var template = TryLoadTemplate(templatePath, out var templateError);
+                    if (templateError != null)
+                        AddDiscoveryDiagnostic(templatePath, titleId, templateError);
+                    var templateText = TryReadTemplate(templatePath);
+                    var history = AchievementMappingResearchStore.Load(titleId);
+                    var mappedCount = mappings?.Properties().Count() ?? 0;
+                    var fullySupported = TryGetString(eventTitle, "FullySupported", out var fullySupportedText)
+                        && bool.TryParse(fullySupportedText, out var fullySupportedValue)
+                        && fullySupportedValue;
+                    var placeholders = GetTemplatePlaceholders(templateText);
+                    var replacementTypes = GetReplacementTypes(mappings);
+                    var usesReplaceIndex = placeholders.Contains("REPLACEINDEX");
+                    var hasUsableTemplate = template != null && usesReplaceIndex;
+                    var compatibility = hasUsableTemplate
+                        ? ResearchCompatibility.ResearchSupported
+                        : game != null || mappedCount > 0 || template != null
+                            ? ResearchCompatibility.ReadOnlyAnalysis
+                            : ResearchCompatibility.Unsupported;
+
+                    var scid = game?.ServiceConfigId;
+                    if (TryGetObject(template, "data", out var templateData)
+                        && TryGetObject(templateData, "baseData", out var baseData)
+                        && TryGetString(baseData, "serviceConfigId", out var templateScid))
+                    {
+                        scid = templateScid;
+                    }
+                    else if (template != null && template.TryGetValue("data", out var dataToken))
+                    {
+                        if (dataToken is not JObject)
+                            AddDiscoveryDiagnostic(templatePath, titleId, $"Expected data object but found {dataToken.Type}.");
+                        else if (dataToken is JObject dataObject
+                            && dataObject.TryGetValue("baseData", out var baseDataToken)
+                            && baseDataToken is not JObject)
+                            AddDiscoveryDiagnostic(templatePath, titleId, $"Expected data.baseData object but found {baseDataToken.Type}.");
+                    }
+
+                    TryGetString(template, "name", out var templateEventName);
+                    titles.Add(new ResearchTitleCard
+                    {
+                        TitleId = titleId,
+                        Name = game?.Name ?? $"Title {titleId}",
+                        Image = string.IsNullOrWhiteSpace(game?.DisplayImage)
+                            ? "pack://application:,,,/Assets/cirno.png"
+                            : game.DisplayImage!,
+                        Scid = scid ?? "<unknown>",
+                        MappedCount = mappedCount,
+                        MissingCount = fullySupported ? "0" : "<load title>",
+                        KnownHits = FormatCandidateValues(history
+                            .Where(entry => entry.CandidateClassification != AchievementResearchClassifier.Unknown)
+                            .Select(entry => entry.ProgressionData)
+                            .Distinct()
+                            .OrderBy(value => value)
+                            .ToList()),
+                        KnownMisses = FormatCandidateValues(history
+                            .GroupBy(entry => entry.ProgressionData)
+                            .Where(group => group.All(entry => entry.Result == "No effect"))
+                            .Select(group => group.Key)
+                            .OrderBy(value => value)
+                            .ToList()),
+                        TemplatePath = templatePath,
+                        TemplateEventName = templateEventName ?? "<template unavailable>",
+                        HasEventTemplate = hasEventTemplate,
+                        HasDataMappings = mappedCount > 0,
+                        HasProgressionDataTemplate = hasUsableTemplate,
+                        UsesReplaceIndex = usesReplaceIndex,
+                        ReplacementTypes = FormatDiscoveryValues(replacementTypes),
+                        OtherPlaceholders = FormatDiscoveryValues(placeholders
+                            .Where(placeholder => placeholder != "REPLACEINDEX")
+                            .ToList()),
+                        Compatibility = compatibility
+                    });
+                }
+                catch (Exception ex)
+                {
+                    skipped++;
+                    AddDiscoveryDiagnostic("Title discovery", titleId, ex.Message);
+                }
+            }
+
+            titles = titles.OrderByDescending(title => title.TitleId == AchievementMappingResearchStore.QuantumBreakTitleId)
                 .ThenBy(title => title.CompatibilitySortOrder)
                 .ThenBy(title => title.Name)
                 .ToList();
@@ -561,10 +657,12 @@ public partial class AchievementResearchLabViewModel : ObservableObject, INaviga
             ResearchTitles = new ObservableCollection<ResearchTitleCard>(titles);
             FilterResearchTitles();
             TitleListStatus =
-                $"Discovery found {titles.Count} title(s): " +
+                $"Discovery scanned {scanned}, loaded {titles.Count}, skipped {skipped}, errors {DiscoveryDiagnostics.Count}. " +
                 $"{titles.Count(title => title.Compatibility == ResearchCompatibility.ResearchSupported)} research supported, " +
                 $"{titles.Count(title => title.Compatibility == ResearchCompatibility.ReadOnlyAnalysis)} read-only analysis, " +
                 $"{titles.Count(title => title.Compatibility == ResearchCompatibility.Unsupported)} unsupported.";
+            DiscoveryDiagnosticsSummary =
+                $"Titles scanned: {scanned}; loaded: {titles.Count}; skipped: {skipped}; discovery errors: {DiscoveryDiagnostics.Count}.";
 
             var quantumBreak = titles.FirstOrDefault(title =>
                 title.TitleId == AchievementMappingResearchStore.QuantumBreakTitleId);
@@ -573,9 +671,11 @@ public partial class AchievementResearchLabViewModel : ObservableObject, INaviga
         }
         catch (Exception ex)
         {
-            TitleListStatus = $"Research title load failed: {ex.Message}";
-            ResearchTitles.Clear();
-            FilteredResearchTitles.Clear();
+            AddDiscoveryDiagnostic("Discovery pass", null, ex.Message);
+            TitleListStatus =
+                $"Discovery stopped after scanning {scanned} title(s), but retained {ResearchTitles.Count} loaded title(s).";
+            DiscoveryDiagnosticsSummary =
+                $"Titles scanned: {scanned}; loaded: {ResearchTitles.Count}; skipped: {skipped}; discovery errors: {DiscoveryDiagnostics.Count}.";
         }
     }
 
@@ -646,17 +746,86 @@ public partial class AchievementResearchLabViewModel : ObservableObject, INaviga
     private static string FormatDiscoveryValues(IReadOnlyCollection<string> values) =>
         values.Count == 0 ? "<none>" : string.Join(", ", values);
 
-    private static JObject? TryLoadTemplate(string path)
+    private void AddDiscoveryDiagnostic(string source, string? titleId, string message) =>
+        DiscoveryDiagnostics.Add(new ResearchDiscoveryDiagnostic
+        {
+            Source = source,
+            TitleId = string.IsNullOrWhiteSpace(titleId) ? "<unknown>" : titleId,
+            Message = message
+        });
+
+    private static bool TryGetString(JToken? token, string propertyName, out string? value)
     {
+        value = null;
+        return TryGetToken(token, propertyName, out var child)
+            && TryGetString(child, out value);
+    }
+
+    private static bool TryGetString(JToken? token, out string? value)
+    {
+        value = token is JValue valueToken ? valueToken.ToString(CultureInfo.InvariantCulture) : null;
+        return value != null;
+    }
+
+    private static bool TryGetInt(JToken? token, string propertyName, out int value)
+    {
+        value = 0;
+        return TryGetToken(token, propertyName, out var child) && TryGetInt(child, out value);
+    }
+
+    private static bool TryGetInt(JToken? token, out int value)
+    {
+        value = 0;
+        return token is JValue valueToken
+            && int.TryParse(valueToken.ToString(CultureInfo.InvariantCulture), NumberStyles.Integer, CultureInfo.InvariantCulture, out value);
+    }
+
+    private static bool TryGetObject(JToken? token, string propertyName, out JObject? value)
+    {
+        value = null;
+        return TryGetToken(token, propertyName, out var child) && TryGetObject(child, out value);
+    }
+
+    private static bool TryGetObject(JToken? token, out JObject? value)
+    {
+        value = token as JObject;
+        return value != null;
+    }
+
+    private static bool TryGetArray(JToken? token, string propertyName, out JArray? value)
+    {
+        value = null;
+        return TryGetToken(token, propertyName, out var child) && TryGetArray(child, out value);
+    }
+
+    private static bool TryGetArray(JToken? token, out JArray? value)
+    {
+        value = token as JArray;
+        return value != null;
+    }
+
+    private static bool TryGetToken(JToken? token, string propertyName, out JToken? value)
+    {
+        value = null;
+        return token is JObject obj && obj.TryGetValue(propertyName, out value);
+    }
+
+    private static JObject? TryLoadTemplate(string path) => TryLoadTemplate(path, out _);
+
+    private static JObject? TryLoadTemplate(string path, out string? error)
+    {
+        error = null;
         try
         {
-            var template = TryReadTemplate(path);
-            return template == null
-                ? null
-                : JObject.Parse(Regex.Replace(template, @"REPLACE[A-Z0-9_]+", "0"));
+            if (!File.Exists(path))
+                return null;
+
+            var template = File.ReadAllText(path);
+            return JObject.Parse(Regex.Replace(template, @"REPLACE[A-Z0-9_]+", "0"));
         }
-        catch
+        catch (Exception ex)
         {
+            error = ex.Message;
             return null;
         }
     }
@@ -724,7 +893,7 @@ public partial class AchievementResearchLabViewModel : ObservableObject, INaviga
             response.achievements.Select(achievement =>
             {
                 var requirements = achievement.progression?.requirements ?? [];
-                var mapping = mappings?[achievement.id] as JObject;
+                TryGetObject(mappings, achievement.id, out var mapping);
                 return new ResearchAchievement
                 {
                     Id = achievement.id,
@@ -748,7 +917,8 @@ public partial class AchievementResearchLabViewModel : ObservableObject, INaviga
         var priorityUnsupportedIds = new HashSet<string> { "19", "28", "29", "47", "48" };
         var rows = response.achievements.SelectMany(achievement =>
         {
-            var mappingStatus = FormatMappingStatus(mappings?[achievement.id] as JObject);
+            TryGetObject(mappings, achievement.id, out var mapping);
+            var mappingStatus = FormatMappingStatus(mapping);
             var classification = AchievementResearchClassifier.ClassifyAchievement(
                 SelectedResearchTitle!.TitleId, achievement.id, _allHistoryEntries);
             var isPriorityUnsupported = SelectedResearchTitle.TitleId == AchievementMappingResearchStore.QuantumBreakTitleId
@@ -882,9 +1052,12 @@ public partial class AchievementResearchLabViewModel : ObservableObject, INaviga
 
     private JObject? LoadSelectedTitleMappings()
     {
-        return SelectedResearchTitle == null
-            ? null
-            : _eventData?[SelectedResearchTitle.TitleId]?["Achievements"] as JObject;
+        if (SelectedResearchTitle == null
+            || !TryGetObject(_eventData, SelectedResearchTitle.TitleId, out var eventTitle)
+            || !TryGetObject(eventTitle, "Achievements", out var mappings))
+            return null;
+
+        return mappings;
     }
 
     private static string FormatMappingStatus(JObject? mapping)
@@ -892,9 +1065,15 @@ public partial class AchievementResearchLabViewModel : ObservableObject, INaviga
         if (mapping == null)
             return "Unsupported: missing event mapping";
 
-        var progressionData = mapping.Properties()
-            .Select(property => property.Value)
-            .FirstOrDefault(value => value["Target"]?.ToString() == "REPLACEINDEX")?["Replacement"]?.ToString();
+        string? progressionData = null;
+        foreach (var property in mapping.Properties())
+        {
+            if (!TryGetString(property.Value, "Target", out var target)
+                || target != "REPLACEINDEX"
+                || !TryGetString(property.Value, "Replacement", out progressionData))
+                continue;
+            break;
+        }
         return string.IsNullOrWhiteSpace(progressionData)
             ? "Mapped"
             : $"Mapped: ProgressionData {progressionData}";
@@ -1535,6 +1714,13 @@ public static class ResearchCompatibility
     public const string ResearchSupported = "Research Supported";
     public const string ReadOnlyAnalysis = "Read-Only Analysis";
     public const string Unsupported = "Unsupported";
+}
+
+public sealed class ResearchDiscoveryDiagnostic
+{
+    public string Source { get; set; } = "";
+    public string TitleId { get; set; } = "<unknown>";
+    public string Message { get; set; } = "";
 }
 
 public sealed class ResearchRequirementAnalysisRow

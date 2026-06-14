@@ -19,6 +19,25 @@
         <StackPanel Margin="0,5,8,8">
             <TextBlock FontSize="22" FontWeight="SemiBold" Text="Achievement Mapping Research Lab"/>
             <TextBlock Margin="0,3,0,8" Text="{Binding ViewModel.TitleListStatus, Mode=OneWay}" TextWrapping="Wrap"/>
+            <Expander Margin="0,0,0,8" Header="Discovery Diagnostics" IsExpanded="False">
+                <StackPanel Margin="0,6,0,0">
+                    <TextBlock Margin="0,0,0,6" Text="{Binding ViewModel.DiscoveryDiagnosticsSummary, Mode=OneWay}" TextWrapping="Wrap"/>
+                    <DataGrid
+                        Height="180"
+                        AutoGenerateColumns="False"
+                        CanUserAddRows="False"
+                        CanUserDeleteRows="False"
+                        CanUserReorderColumns="False"
+                        IsReadOnly="True"
+                        ItemsSource="{Binding ViewModel.DiscoveryDiagnostics, Mode=OneWay}">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="Source" Binding="{Binding Source, Mode=OneWay}" Width="2*"/>
+                            <DataGridTextColumn Header="Title ID" Binding="{Binding TitleId, Mode=OneWay}" Width="110"/>
+                            <DataGridTextColumn Header="Exception / diagnostic" Binding="{Binding Message, Mode=OneWay}" Width="4*"/>
+                        </DataGrid.Columns>
+                    </DataGrid>
+                </StackPanel>
+            </Expander>
             <ui:TextBox
                 Margin="0,0,0,8"
                 ClearButtonEnabled="True"
