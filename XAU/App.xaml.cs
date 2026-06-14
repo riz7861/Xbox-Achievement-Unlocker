@@ -35,6 +35,8 @@ public partial class App
             services.AddSingleton<PlaceholderPage>();
             services.AddSingleton<StatsPage>();
             services.AddSingleton<StatsViewModel>();
+            services.AddSingleton<QuantumBreakResearchPage>();
+            services.AddSingleton<QuantumBreakResearchViewModel>();
             services.AddSingleton<MiscPage>();
             services.AddSingleton<MiscViewModel>();
             services.AddSingleton<InfoPage>();

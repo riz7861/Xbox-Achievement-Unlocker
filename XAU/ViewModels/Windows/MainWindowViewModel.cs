@@ -67,12 +67,6 @@ namespace XAU.ViewModels.Windows
                 Icon = new SymbolIcon { Symbol = SymbolRegular.Trophy24 },
                 TargetPageType = typeof(Views.Pages.AchievementsPage)
             },
-            /*new NavigationViewItem()
-            {
-                Content = "Stats",
-                Icon = new SymbolIcon { Symbol = SymbolRegular.DataHistogram24 },
-                TargetPageType = typeof(Views.Pages.StatsPage)
-            },*/
             new NavigationViewItem()
             {
                 Content = "Misc",
@@ -86,6 +80,18 @@ namespace XAU.ViewModels.Windows
                 Content = "Debug",
                 Icon = new SymbolIcon { Symbol = SymbolRegular.Bug24 },
                 TargetPageType = typeof(Views.Pages.DebugPage)
+            },
+            new NavigationViewItem()
+            {
+                Content = "Stat Explorer",
+                Icon = new SymbolIcon { Symbol = SymbolRegular.DataHistogram24 },
+                TargetPageType = typeof(Views.Pages.StatsPage)
+            },
+            new NavigationViewItem()
+            {
+                Content = "QB Mapping Research",
+                Icon = new SymbolIcon { Symbol = SymbolRegular.Search24 },
+                TargetPageType = typeof(Views.Pages.QuantumBreakResearchPage)
             }
             #endif
 
