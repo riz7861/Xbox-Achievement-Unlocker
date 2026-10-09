@@ -12,14 +12,19 @@ namespace XAU.Services.HttpServer
         private readonly HttpListener _listener;
         private readonly Dictionary<string, Func<HttpListenerContext, Task>> _routes;
         private string _port;
+        private readonly bool _localOnly;
         private bool _isRunning;
         private bool _disposed;
         private const string FirewallRuleName = "XAU API Server";
 
-        public HttpServer(string port, Dictionary<string, Func<HttpListenerContext, Task>> routes)
+        public HttpServer(
+            string port,
+            Dictionary<string, Func<HttpListenerContext, Task>> routes,
+            bool localOnly = false)
         {
             _port = port;
             _routes = routes;
+            _localOnly = localOnly;
             _listener = new HttpListener();
             UpdateListenerPrefixes();
         }
@@ -51,7 +56,7 @@ namespace XAU.Services.HttpServer
             _listener.Prefixes.Clear();
             _listener.Prefixes.Add($"http://localhost:{_port}/");
 
-            if (IsAdministrator())
+            if (IsAdministrator() && !_localOnly)
             {
                 // Admin required for other PCs on the network to access API (ex: XAU Mobile)
                 _listener.Prefixes.Add($"http://*:{_port}/");
@@ -142,9 +147,10 @@ namespace XAU.Services.HttpServer
         {
             if (_isRunning) return;
 
+            LastStartError = null;
             try
             {
-                if (!IsAdministrator())
+                if (!IsAdministrator() || _localOnly)
                 {
                     _listener.Start();
                     _isRunning = true;
@@ -159,14 +165,8 @@ namespace XAU.Services.HttpServer
             }
             catch (HttpListenerException ex)
             {
-                if (IsAdministrator())
-                {
-                    RestartAsAdmin();
-                }
-                else
-                {
-                    Debug.WriteLine($"Failed to start HTTP server: {ex.Message}");
-                }
+                LastStartError = $"{ex.GetType().Name} (0x{ex.HResult:X8}): {ex.Message}";
+                Debug.WriteLine($"Failed to start HTTP server: {LastStartError}");
             }
         }
 
@@ -224,6 +224,7 @@ namespace XAU.Services.HttpServer
         }
 
         public bool IsRunning => _isRunning;
+        public string? LastStartError { get; private set; }
 
         public void Dispose()
         {
