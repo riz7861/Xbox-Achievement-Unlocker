@@ -152,6 +152,7 @@ public partial class AchievementResearchLabViewModel : ObservableObject, INaviga
         PayloadPreview = "";
         SelectedAchievement = null;
         ClearSelectedMappingAnalysis();
+        BuildSupportAudit(null);
         ResultDetails = "";
         ProposedMapping = "";
         RangeAttempts.Clear();
@@ -925,6 +926,7 @@ public partial class AchievementResearchLabViewModel : ObservableObject, INaviga
                 AchievementStatus = "Achievements could not be loaded. Ensure Xbox authentication is connected.";
                 Achievements.Clear();
                 ClearRequirementAnalysis();
+                BuildSupportAudit(null);
                 return;
             }
 
@@ -938,6 +940,7 @@ public partial class AchievementResearchLabViewModel : ObservableObject, INaviga
             AchievementStatus = $"Achievement load failed: {ex.Message}";
             Achievements.Clear();
             ClearRequirementAnalysis();
+            BuildSupportAudit(null);
         }
         finally
         {
@@ -956,9 +959,10 @@ public partial class AchievementResearchLabViewModel : ObservableObject, INaviga
 
     private void ApplyAchievements(AchievementsResponse response, string? selectedId)
     {
+        BuildSupportAudit(response);
         var mappings = LoadSelectedTitleMappings();
         Achievements = new ObservableCollection<ResearchAchievement>(
-            response.achievements.Select(achievement =>
+            response.achievements.Where(achievement => achievement != null && !string.IsNullOrWhiteSpace(achievement.id)).Select(achievement =>
             {
                 var requirements = achievement.progression?.requirements ?? [];
                 TryGetObject(mappings, achievement.id, out var mapping);
@@ -983,7 +987,7 @@ public partial class AchievementResearchLabViewModel : ObservableObject, INaviga
     private void BuildRequirementAnalysis(AchievementsResponse response, JObject? mappings)
     {
         var priorityUnsupportedIds = new HashSet<string> { "19", "28", "29", "47", "48" };
-        var rows = response.achievements.SelectMany(achievement =>
+        var rows = response.achievements.Where(achievement => achievement != null && !string.IsNullOrWhiteSpace(achievement.id)).SelectMany(achievement =>
         {
             TryGetObject(mappings, achievement.id, out var mapping);
             var mappingStatus = FormatMappingStatus(mapping);
@@ -1322,7 +1326,7 @@ public partial class AchievementResearchLabViewModel : ObservableObject, INaviga
         Func<AchievementRequirements, string?> selector) =>
         requirements.Count == 0
             ? "<none>"
-            : string.Join(", ", requirements.Select(requirement => selector(requirement) ?? "<none>"));
+            : string.Join(", ", requirements.Select(requirement => requirement == null ? "<missing>" : selector(requirement) ?? "<none>"));
 
     private bool TryGetCandidate(out int candidate)
     {

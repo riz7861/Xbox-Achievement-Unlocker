@@ -165,6 +165,53 @@
                 </DataGrid.Columns>
             </DataGrid>
 
+            <Expander Margin="0,0,0,10" Header="Achievement Support Audit" IsExpanded="False">
+                <StackPanel Margin="0,8,0,0">
+                    <TextBlock Margin="0,0,0,8" TextWrapping="Wrap"
+                               Text="{Binding ViewModel.SupportAuditSummary, Mode=OneWay}"/>
+                    <Grid Margin="0,0,0,8">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="200"/>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <ComboBox Margin="0,0,8,0"
+                                  ItemsSource="{Binding ViewModel.SupportAuditFilters, Mode=OneWay}"
+                                  SelectedItem="{Binding ViewModel.SupportAuditFilter, Mode=TwoWay}"/>
+                        <ui:TextBox Grid.Column="1" Margin="0,0,8,0" PlaceholderText="Search ID, name, requirement, target, or reason"
+                                    Text="{Binding ViewModel.SupportAuditSearch, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"/>
+                        <ui:Button Grid.Column="2" Icon="{ui:SymbolIcon Copy24}" Content="Copy audit"
+                                   Command="{Binding ViewModel.CopySupportAuditCommand}"/>
+                    </Grid>
+                    <DataGrid Height="300" Margin="0,0,0,8" AutoGenerateColumns="False"
+                              CanUserAddRows="False" CanUserDeleteRows="False" IsReadOnly="True" SelectionMode="Single"
+                              ItemsSource="{Binding ViewModel.SupportAuditRows, Mode=OneWay}"
+                              SelectedItem="{Binding ViewModel.SelectedSupportAuditRow, Mode=TwoWay}">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="ID" Binding="{Binding Id, Mode=OneWay}" Width="65"/>
+                            <DataGridTextColumn Header="Achievement" Binding="{Binding Name, Mode=OneWay}" Width="190"/>
+                            <DataGridTextColumn Header="State" Binding="{Binding State, Mode=OneWay}" Width="95"/>
+                            <DataGridTextColumn Header="Category" Binding="{Binding Category, Mode=OneWay}" Width="170"/>
+                            <DataGridTextColumn Header="Normal Unlock eligible" Binding="{Binding UnlockableDisplay, Mode=OneWay}" Width="170"/>
+                            <DataGridCheckBoxColumn Header="Mapping exists" Binding="{Binding MappingPresent, Mode=OneWay}" Width="115"/>
+                            <DataGridCheckBoxColumn Header="Template exists" Binding="{Binding TemplateAvailable, Mode=OneWay}" Width="120"/>
+                            <DataGridTextColumn Header="Reason" Binding="{Binding Reason, Mode=OneWay}" Width="300"/>
+                            <DataGridTextColumn Header="Requirement IDs" Binding="{Binding RequirementIds, Mode=OneWay}" Width="220"/>
+                            <DataGridTextColumn Header="Current" Binding="{Binding Current, Mode=OneWay}" Width="140"/>
+                            <DataGridTextColumn Header="Target" Binding="{Binding Target, Mode=OneWay}" Width="140"/>
+                            <DataGridTextColumn Header="OperationType" Binding="{Binding OperationTypes, Mode=OneWay}" Width="140"/>
+                            <DataGridTextColumn Header="ValueType" Binding="{Binding ValueTypes, Mode=OneWay}" Width="140"/>
+                            <DataGridTextColumn Header="RuleParticipationType" Binding="{Binding RuleParticipationTypes, Mode=OneWay}" Width="170"/>
+                            <DataGridTextColumn Header="Replacement types" Binding="{Binding ReplacementTypes, Mode=OneWay}" Width="200"/>
+                            <DataGridTextColumn Header="Replacement targets" Binding="{Binding ReplacementTargets, Mode=OneWay}" Width="230"/>
+                        </DataGrid.Columns>
+                    </DataGrid>
+                    <TextBox Height="220" IsReadOnly="True" AcceptsReturn="True" FontFamily="Consolas"
+                             TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"
+                             Text="{Binding ViewModel.SelectedSupportAuditRow.Details, Mode=OneWay}"/>
+                </StackPanel>
+            </Expander>
+
             <Expander
                 Margin="0,0,0,10"
                 Header="Selected achievement mapped payload analysis (read-only)"
